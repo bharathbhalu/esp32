@@ -1062,7 +1062,7 @@ static void drawRelaySheet() {
     uint16_t stateColor = LIGHT_GRAY;
     if (!st.started) state = "Starts once the camera is connected";
     else if (!st.enabled) state = "Off";
-    else if (st.tapWifi) state = "FrameTap in control", stateColor = OK_GREEN;
+    else if (st.tapWifi) state = "Shared with FrameTap", stateColor = OK_GREEN;
     else if (st.tapBle) state = "FrameTap pairing (BLE)", stateColor = AMBER;
     else if (st.advertising) state = "Waiting for FrameTap";
     else state = "Idle";
@@ -1075,7 +1075,7 @@ static void drawRelaySheet() {
     };
     row("NAME", st.started ? st.name : String("-"), WHITE);
     row("STATUS", state, stateColor);
-    if (st.claimed) row("BOARD", "paused - FrameTap has it", AMBER);
+    if (st.claimed) row("BOARD", "sharing FrameTap's session", OK_GREEN);
     if (st.tapWifi) {
         row("PHONE", st.tapIp.toString(), WHITE);
         row("VIDEO", String(st.kbToTap) + " KB/s  " + String(st.videoPkts) + " pkt/s", WHITE);

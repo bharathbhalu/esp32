@@ -297,111 +297,170 @@ static void receiveTask(void *) {
     }
 }
 
-// ---------- Command sequence translation ----------
+// ---------- Command sequence sharing ----------
 // The camera numbers each packet type separately. Only the command stream
-// (type 5, steps of 8) will be shared with the board, so FrameTap's command
-// numbers are mapped onto one camera-side sequence and every field that
-// echoes them is mapped back. Video and the camera's own numbering pass
-// unchanged. Runs only in sendTask, so no locking.
+// (type 5: seq in steps of 8, plus a per-command counter) is shared with the
+// board. Camera number = FrameTap's number + 8 per board command injected
+// before it, counter likewise + 1. Fields that echo command numbers back are
+// shifted down again. Until the board injects, nothing is touched at all.
+// Video and the camera's own numbering pass unchanged. Runs only in sendTask.
 //
-// Fields: t5 seq at 4-5 (in the xor) and 10-11; t4 short form pair at 24-27;
-// t1 pair at 24-27; t3 ack at 8-9.
+// Fields: t5 seq at 4-5 (in the xor) and 10-11, counter at 16; t4 short form
+// pair at 24-27; t1 pair at 24-27; t3 ack at 8-9.
 
-static const bool XLAT = false; // off: checking whether the translator stalls FrameTap
+static const int INJ_SLOTS = 64;
+static uint16_t injTapAfter[INJ_SLOTS]; // FrameTap's last command number when the board's went in
+static uint16_t injCam[INJ_SLOTS];      // the board command's camera number
+static int injCount = 0, injNext = 0;
+static uint32_t injEvicted = 0;         // older injections, counted in full
 
-struct SeqMap {
-    uint16_t tap, cam; // multiples of 8
-    bool fromTap;
+static uint16_t tapSession = 0, tapLastSeq = 0, tapLastAck = 0, camLastSeq = 0;
+static uint8_t camLastCounter = 0;
+static bool tapSeen = false;
+static volatile uint32_t xlatUp = 0, xlatDown = 0, injected = 0;
+
+struct Injection {
+    uint16_t len;
+    uint8_t duml[256];
 };
-static const int MAP_SLOTS = 256;
-static SeqMap seqMap[MAP_SLOTS];
-static int mapCount = 0, mapNext = 0;
-static uint16_t camNext = 0;
-static volatile uint32_t xlatUp = 0, xlatResend = 0, xlatDown = 0;
+static QueueHandle_t injectQ = nullptr;
+
+// Copies of the camera's status/reply datagrams to FrameTap, read in update()
+struct Observed {
+    uint16_t len;
+    uint8_t data[1100];
+};
+static QueueHandle_t observeQ = nullptr;
+static void (*observer)(const uint8_t *, size_t) = nullptr;
+
+void setObserver(void (*fn)(const uint8_t *, size_t)) { observer = fn; }
 
 static uint16_t rd16(const uint8_t *p) { return p[0] | (p[1] << 8); }
 static void wr16(uint8_t *p, uint16_t v) { p[0] = v; p[1] = v >> 8; }
 
-static void resetMap() { mapCount = mapNext = 0; }
+static void resetShare() { injCount = injNext = 0, injEvicted = 0, tapSeen = false; }
 
-static const SeqMap *findTap(uint16_t tap) {
-    for (int i = 0; i < mapCount; i++) {
-        const SeqMap &m = seqMap[(mapNext - 1 - i + MAP_SLOTS) % MAP_SLOTS];
-        if (m.fromTap && m.tap == tap) return &m;
+// Numbers are 16-bit and FrameTap uses ~560 a second, so an injection compared
+// against numbers half the range away (~58 s later) would flip sides. Once
+// both streams are well past one it only ever counts in full.
+static void foldOld() {
+    while (injCount > 0) {
+        int oldest = (injNext - injCount + INJ_SLOTS) % INJ_SLOTS;
+        if ((int16_t)(tapLastSeq - injTapAfter[oldest]) < 0x2000 || (int16_t)(camLastSeq - injCam[oldest]) < 0x2000)
+            break;
+        injCount--;
+        injEvicted++;
     }
-    return nullptr;
 }
 
-// Echoed numbers aren't always ones that were sent (telemetry also reports
-// "next expected"), so both directions map by offset from the nearest
-// FrameTap entry at or below the value, skipping the board's packets in between.
-// Low 3 bits are kept, they mark resends.
-
-// FrameTap's number -> camera's
-static uint16_t tapToCam(uint16_t v) {
-    uint16_t key = v & ~7;
-    uint16_t boards = 0;
-    for (int i = 0; i < mapCount; i++) {
-        const SeqMap &m = seqMap[(mapNext - 1 - i + MAP_SLOTS) % MAP_SLOTS];
-        if (!m.fromTap) { boards++; continue; }
-        if ((int16_t)(m.tap - key) > 0) { boards = 0; continue; }
-        // beyond the newest FrameTap packet the board's later ones still count
-        return (m.cam + (uint16_t)(key - m.tap) + (key == m.tap ? 0 : 8 * boards)) | (v & 7);
-    }
-    return v;
+// Board commands that precede FrameTap's command number v
+static uint32_t boardsBeforeTap(uint16_t v) {
+    uint32_t n = injEvicted;
+    for (int i = 0; i < injCount; i++)
+        if ((int16_t)((v & ~7) - injTapAfter[i]) > 0) n++;
+    return n;
 }
 
-// Camera's number -> FrameTap's
-static uint16_t camToTap(uint16_t v) {
-    uint16_t key = v & ~7;
-    uint16_t boards = 0;
-    for (int i = 0; i < mapCount; i++) {
-        const SeqMap &m = seqMap[(mapNext - 1 - i + MAP_SLOTS) % MAP_SLOTS];
-        if ((int16_t)(m.cam - key) > 0) continue;
-        if (!m.fromTap) { boards++; continue; }
-        return (m.tap + (uint16_t)(key - m.cam - 8 * boards)) | (v & 7);
-    }
-    return v;
+// Board commands at or before camera number v
+static uint32_t boardsUpToCam(uint16_t v) {
+    uint32_t n = injEvicted;
+    for (int i = 0; i < injCount; i++)
+        if ((int16_t)((v & ~7) - injCam[i]) >= 0) n++;
+    return n;
 }
 
-static uint16_t assign(uint16_t tap, bool fromTap) {
-    if (mapCount == 0) camNext = tap; // first command: identity, so FrameTap alone is unchanged
-    uint16_t cam = camNext;
-    camNext += 8;
-    seqMap[mapNext] = SeqMap{tap, cam, fromTap};
-    mapNext = (mapNext + 1) % MAP_SLOTS;
-    if (mapCount < MAP_SLOTS) mapCount++;
-    return cam;
-}
+static uint16_t tapToCam(uint16_t v) { return v + 8 * boardsBeforeTap(v); }
+static uint16_t camToTap(uint16_t v) { return v - 8 * boardsUpToCam(v); }
 
 static void translate(Slot &slot) {
     uint8_t *d = slot.data;
     if (slot.len < 8) return;
     uint8_t type = d[6];
     if (slot.toCamera) {
-        if (type == 0x00) resetMap(); // FrameTap (re)opening its session
-        else if (type == 0x05 && slot.len >= 12) {
-            uint16_t seq = rd16(d + 4), key = seq & ~7;
-            const SeqMap *m = findTap(key);
-            uint16_t cam = m ? m->cam : assign(key, true);
-            if (m) xlatResend++;
-            else xlatUp++;
-            cam |= seq & 7;
-            wr16(d + 4, cam);
-            if (rd16(d + 10) == seq) wr16(d + 10, cam);
-            d[7] = d[0] ^ d[1] ^ d[2] ^ d[3] ^ d[4] ^ d[5] ^ d[6];
-        } else if (type == 0x04 && slot.len == 34) {
+        if (type == 0x00 && slot.len >= 10) {
+            // Handshake. FrameTap repeats it inside a session (e.g. on a mode
+            // change); only a new session or base number restarts the sharing.
+            static uint16_t hsSession = 0, hsBase = 0;
+            uint16_t session = rd16(d + 2), base = rd16(d + 8);
+            bool fresh = session != hsSession || base != hsBase;
+            Serial.printf("relay: FrameTap handshake session %04X base %04X - %s\n", session, base,
+                          fresh ? "new session, sharing reset" : "same session, offset kept");
+            hsSession = session;
+            hsBase = base;
+            if (fresh) resetShare();
+        }
+        else if (type == 0x05 && slot.len >= 18) {
+            uint16_t seq = rd16(d + 4);
+            if (!tapSeen || (int16_t)((seq & ~7) - tapLastSeq) > 0) tapLastSeq = seq & ~7;
+            tapSeen = true;
+            tapSession = rd16(d + 2);
+            tapLastAck = rd16(d + 8);
+            foldOld();
+            uint32_t n = injCount || injEvicted ? boardsBeforeTap(seq) : 0;
+            if (n) {
+                uint16_t cam = seq + 8 * n;
+                wr16(d + 4, cam);
+                if (rd16(d + 10) == seq) wr16(d + 10, cam);
+                d[16] += n;
+                d[7] = d[0] ^ d[1] ^ d[2] ^ d[3] ^ d[4] ^ d[5] ^ d[6];
+                xlatUp++;
+            }
+            uint16_t cam = rd16(d + 4) & ~7;
+            if ((int16_t)(cam - camLastSeq) >= 0) {
+                camLastSeq = cam;
+                camLastCounter = d[16];
+            }
+        } else if (type == 0x04 && slot.len == 34 && (injCount || injEvicted)) {
             wr16(d + 24, tapToCam(rd16(d + 24)));
             wr16(d + 26, tapToCam(rd16(d + 26)));
         }
-    } else if (type == 0x03 && slot.len >= 10) {
-        wr16(d + 8, camToTap(rd16(d + 8)));
-        xlatDown++;
-    } else if (type == 0x01 && slot.len >= 28) {
-        wr16(d + 24, camToTap(rd16(d + 24)));
-        wr16(d + 26, camToTap(rd16(d + 26)));
-        xlatDown++;
+    } else if (injCount || injEvicted) {
+        // Reply to a board command: DUML (at byte 20) seq in the board's range
+        if (type == 0x03 && slot.len > 30 && d[20] == 0x55 && d[27] >= 0xB0)
+            Serial.printf("relay: camera answered board command %02X/%02X: %02X %02X %02X\n", d[29], d[30], d[31],
+                          d[32], d[33]);
+        if (type == 0x03 && slot.len >= 10) {
+            wr16(d + 8, camToTap(rd16(d + 8)));
+            xlatDown++;
+        } else if (type == 0x01 && slot.len >= 28) {
+            wr16(d + 24, camToTap(rd16(d + 24)));
+            wr16(d + 26, camToTap(rd16(d + 26)));
+            xlatDown++;
+        }
     }
+}
+
+// A board command in FrameTap's session: next camera number and counter
+static void sendInjection(const Injection &inj, const sockaddr_in &cam) {
+    if (!tapSeen) return;
+    uint16_t seq = camLastSeq + 8;
+    uint8_t counter = camLastCounter + 1;
+    uint8_t pkt[8 + 12 + sizeof(inj.duml)];
+    size_t len = 8 + 12 + inj.len;
+    wr16(pkt, 0x8000 | len);
+    wr16(pkt + 2, tapSession);
+    wr16(pkt + 4, seq);
+    pkt[6] = 0x05;
+    pkt[7] = pkt[0] ^ pkt[1] ^ pkt[2] ^ pkt[3] ^ pkt[4] ^ pkt[5] ^ pkt[6];
+    wr16(pkt + 8, tapLastAck);
+    wr16(pkt + 10, seq);
+    memset(pkt + 12, 0, 4);
+    pkt[16] = counter;
+    pkt[17] = 0x01;
+    pkt[18] = pkt[19] = 0;
+    memcpy(pkt + 20, inj.duml, inj.len);
+    sendto(sock, pkt, len, 0, (const sockaddr *)&cam, sizeof(cam));
+
+    if (injCount == INJ_SLOTS) injEvicted++;
+    else injCount++;
+    injTapAfter[injNext] = tapLastSeq;
+    injCam[injNext] = seq;
+    injNext = (injNext + 1) % INJ_SLOTS;
+    camLastSeq = seq;
+    camLastCounter = counter;
+    injected++;
+    Serial.printf("relay: board command injected, cam seq %04X counter %u (FrameTap last %04X)\n", seq, counter,
+                  tapLastSeq);
 }
 
 static void sendTask(void *) {
@@ -410,16 +469,37 @@ static void sendTask(void *) {
     cam.sin_family = AF_INET;
     cam.sin_port = htons(DATALINK_PORT);
     cam.sin_addr.s_addr = camIp;
+    Injection inj;
     while (true) {
-        if (xQueueReceive(ready, &idx, portMAX_DELAY) != pdTRUE) continue;
+        if (xQueueReceive(injectQ, &inj, 0) == pdTRUE) sendInjection(inj, cam);
+        if (xQueueReceive(ready, &idx, pdMS_TO_TICKS(20)) != pdTRUE) continue;
         Slot &slot = ring[idx];
         if (!slot.toCamera && tapAddr.sin_port == 0) continue;
-        if (XLAT) translate(slot);
+        translate(slot);
+        if (!slot.toCamera && observer && observeQ && (slot.data[6] == 0x01 || slot.data[6] == 0x03) &&
+            slot.len <= sizeof(Observed::data)) {
+            static Observed o;
+            o.len = slot.len;
+            memcpy(o.data, slot.data, slot.len);
+            xQueueSend(observeQ, &o, 0); // full: the board misses one status update
+        }
         const sockaddr_in *to = slot.toCamera ? &cam : &tapAddr;
         sendto(sock, slot.data, slot.len, 0, (const sockaddr *)to, sizeof(*to));
         if (slot.toCamera) bytesToCam += slot.len;
         else bytesToTap += slot.len;
     }
+}
+
+bool inject(Duml::Frame f) {
+    if (!started || !injectQ || !lastTapPacket || millis() - lastTapPacket > 3000) return false;
+    static uint16_t dumlSeq = 0xB000; // own range, so replies to the board can be told apart
+    f.seq = dumlSeq++;
+    std::vector<uint8_t> b = Duml::encode(f);
+    Injection inj;
+    if (b.size() > sizeof(inj.duml)) return false;
+    inj.len = b.size();
+    memcpy(inj.duml, b.data(), b.size());
+    return xQueueSend(injectQ, &inj, 0) == pdTRUE;
 }
 
 // TCP 7001: FrameTap's connection is mirrored to the camera's
@@ -479,6 +559,8 @@ void start(NimBLEClient *camera, NimBLERemoteCharacteristic *const chars[3], con
     ring = (Slot *)ps_malloc(sizeof(Slot) * RING_SLOTS);
     samples = (Sample *)ps_malloc(sizeof(Sample) * SAMPLE_SLOTS);
     ready = xQueueCreate(RING_SLOTS - 2, sizeof(uint16_t)); // spare: the slot being sent + received into
+    injectQ = xQueueCreate(4, sizeof(Injection));
+    observeQ = xQueueCreate(12, sizeof(Observed));
     sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     sockaddr_in local{};
     local.sin_family = AF_INET;
@@ -527,6 +609,10 @@ void update() {
     wasTapConnected = tapConnected;
     flushOutgoing();
     if (enabled) pollTcp();
+    if (observeQ && observer) {
+        static Observed o;
+        for (int n = 0; n < 12 && xQueueReceive(observeQ, &o, 0) == pdTRUE; n++) observer(o.data, o.len);
+    }
     printSamples();
 
     // Quiet BLE while FrameTap is on Wi-Fi: no advertising, slow camera connection
@@ -557,10 +643,10 @@ void update() {
         bytesToTap = bytesToCam = videoPkts = videoMissing = 0;
         if (tapOnWifi())
             Serial.printf("relay: FrameTap Wi-Fi  to cam %lu KB/s, to FrameTap %lu KB/s, video %lu pkt/s, "
-                          "cmds %lu, ble queue %u, xlat up %lu resend %lu down %lu\n",
-                          lastKbToCam, lastKbToTap, lastVideoPkts, tapCmds, (unsigned)outgoing.size(), xlatUp,
-                          xlatResend, xlatDown);
-        xlatUp = xlatResend = xlatDown = tapCmds = 0;
+                          "cmds %lu, ble queue %u, injected %lu, xlat up %lu down %lu\n",
+                          lastKbToCam, lastKbToTap, lastVideoPkts, tapCmds, (unsigned)outgoing.size(), injected,
+                          xlatUp, xlatDown);
+        xlatUp = xlatDown = tapCmds = 0;
     }
 }
 

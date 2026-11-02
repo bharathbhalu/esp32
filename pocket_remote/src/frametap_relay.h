@@ -12,6 +12,7 @@
 #pragma once
 #include <Arduino.h>
 #include <NimBLEDevice.h>
+#include "duml.h"
 
 namespace Relay {
 
@@ -30,6 +31,13 @@ bool onCameraNotify(uint16_t charId, const uint8_t *data, size_t len);
 void update();
 
 void setEnabled(bool on);
+
+// Sends a board command into FrameTap's session (FrameTap must be on Wi-Fi);
+// the command numbers of both are kept in one sequence for the camera
+bool inject(Duml::Frame f);
+
+// Called from update() with each camera status/reply datagram sent to FrameTap
+void setObserver(void (*fn)(const uint8_t *data, size_t len));
 
 // True while FrameTap holds the camera (pairing, or on Wi-Fi, within the last 10 s).
 // The camera serves one control session, so the board's own must close meanwhile.

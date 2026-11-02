@@ -191,7 +191,10 @@ void Datalink::sendRaw(uint8_t pktType, const std::vector<uint8_t> &payload) {
 }
 
 void Datalink::send(Duml::Frame f) {
-    if (!open_) return; // session handed to FrameTap (or not up yet): send nothing
+    if (!open_) { // session handed to FrameTap: its session carries ours too
+        if (forward_) forward_(f);
+        return;
+    }
     f.seq = dumlSeq_++;
     cmdCounter_++;
     std::vector<uint8_t> routing = routingHeader(udpSeq_, cmdCounter_);
@@ -264,6 +267,14 @@ void Datalink::handleDatagram(const uint8_t *data, size_t len) {
                           f.payload.empty() ? "-" : String(f.payload[0], 16).c_str());
         apply(f);
     }
+}
+
+void Datalink::observe(const uint8_t *data, size_t len) {
+    if (len < 8 || data[6] == PKT_VIDEO) return;
+    // Pushes only: replies to FrameTap's own requests carry a status byte
+    // first, so the same decoder reads them wrong (battery flickered to 0)
+    for (const Duml::Frame &f : scanFrames(data, len))
+        if (!(f.flags & 0x80)) apply(f);
 }
 
 // Status decoding from OpenCine's CameraStatus+DJIWire.swift

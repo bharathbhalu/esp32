@@ -199,6 +199,11 @@ static void bringupTask(void *) {
     bleChars[2] = bleWrite;
     relayOwnsBle = true;
     Relay::start(bleClient, bleChars, camName, camMfr, camIp, AP_SSID, AP_PASS);
+    // While FrameTap holds the session the board's commands ride in it, and the
+    // board reads the camera's status from the packets going to FrameTap
+    static Datalink *link = &self->datalink();
+    link->setForwarder(Relay::inject);
+    Relay::setObserver([](const uint8_t *d, size_t n) { link->observe(d, n); });
     vTaskDelete(nullptr);
 }
 
@@ -346,10 +351,6 @@ bool RealCamera::pending(SettingId s) const {
 
 void RealCamera::shutter() {
     if (link_ != Link::Connected) return;
-    if (handedOff) {
-        message("FrameTap has control");
-        return;
-    }
     if (isPhotoMode()) datalink_.send(Duml::shootPhoto());
     else if (datalink_.state().recording) datalink_.send(Duml::recordStop(0));
     else datalink_.send(Duml::recordStart(0));
@@ -415,28 +416,22 @@ void RealCamera::update() {
         if (claimed && !handedOff) {
             handedOff = true;
             datalink_.close();
-            queue_.clear();
-            message("FrameTap has control");
+            message("FrameTap joined - shared control");
         } else if (!claimed && handedOff) {
             handedOff = false;
             message("Board taking control back...");
             if (datalink_.open(CAMERA_IP, [](const String &s) { Serial.println(s); })) message("Board in control");
             else message("Reconnect failed - retrying");
         }
-        if (handedOff) {
-            if (!queue_.empty()) {
-                queue_.clear();
-                message("FrameTap has control");
+        if (!handedOff) {
+            datalink_.poll();
+            // Is the board's own session still getting the camera's status pushes?
+            static bool ownAlive = true;
+            bool alive = millis() - datalink_.state().lastStatusMs < 3000;
+            if (alive != ownAlive) {
+                ownAlive = alive;
+                Serial.printf("own session: %s\n", alive ? "ALIVE" : "SILENT (camera stopped talking to the board)");
             }
-            return;
-        }
-        datalink_.poll();
-        // Is the board's own session still getting the camera's status pushes?
-        static bool ownAlive = true;
-        bool alive = millis() - datalink_.state().lastStatusMs < 3000;
-        if (alive != ownAlive) {
-            ownAlive = alive;
-            Serial.printf("own session: %s\n", alive ? "ALIVE" : "SILENT (camera stopped talking to the board)");
         }
         // Send one queued setting at a time, paced so each lands before the next
         static uint32_t lastSend = 0;

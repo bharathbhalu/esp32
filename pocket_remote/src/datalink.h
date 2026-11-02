@@ -30,6 +30,11 @@ public:
 
     void send(Duml::Frame f);  // stamps seq/counter and wraps it
     void poll();               // receive, ACK pump, keepalive; call often
+
+    // While closed, send() hands commands to this instead (FrameTap's shared session)
+    void setForwarder(bool (*fn)(Duml::Frame)) { forward_ = fn; }
+    // Status from camera datagrams that were meant for someone else
+    void observe(const uint8_t *data, size_t len);
     const CameraState &state() const { return state_; }
 
 private:
@@ -45,6 +50,7 @@ private:
     IPAddress camera_;
     bool open_ = false;
     void (*log_)(const String &) = nullptr;
+    bool (*forward_)(Duml::Frame) = nullptr;
 
     uint16_t sessionId_ = 0, baseSeq_ = 0, udpSeq_ = 0, dumlSeq_ = 0xA000;
     uint8_t cmdCounter_ = 0;
