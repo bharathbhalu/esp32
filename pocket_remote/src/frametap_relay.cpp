@@ -118,9 +118,58 @@ static std::vector<uint8_t> statusString(const char *s) {
     return p;
 }
 
+// Outgoing BLE, only touched from update(). Sends fail with rc=6 when NimBLE's
+// buffers are full; the packet then stays queued and is retried after a pause
+// (retrying every loop starved Wi-Fi of airtime and stuttered live view).
+// Relayed packets go stale after 2 s; our own replies to FrameTap never do.
+struct Outgoing {
+    bool toTap;
+    int idx;
+    bool withResponse;
+    bool own;
+    uint32_t queuedAt;
+    std::vector<uint8_t> data;
+};
+static std::deque<Outgoing> outgoing;
+static uint32_t retryAfter = 0;
+
+static void send(bool toTap, int idx, const uint8_t *data, size_t len, bool withResponse = false, bool own = false) {
+    if (outgoing.size() < 300)
+        outgoing.push_back(Outgoing{toTap, idx, withResponse, own, millis(), std::vector<uint8_t>(data, data + len)});
+}
+
+// FrameTap left BLE: what it sent hasn't reached the camera and no longer should
+static void dropFromTap() {
+    for (auto it = outgoing.begin(); it != outgoing.end();) it = it->toTap ? it + 1 : outgoing.erase(it);
+}
+
+static void flushOutgoing() {
+    if (millis() < retryAfter) return;
+    for (int n = 0; n < 8 && !outgoing.empty(); n++) {
+        Outgoing &o = outgoing.front();
+        if (!o.own && millis() - o.queuedAt > 2000) {
+            outgoing.pop_front();
+            continue;
+        }
+        bool ok;
+        if (o.toTap) {
+            if (!tapConnected || !tapChars[o.idx]) ok = true; // nobody to send to: drop
+            else ok = tapChars[o.idx]->notify(o.data.data(), o.data.size());
+        } else {
+            if (!camChars[o.idx] || !camClient || !camClient->isConnected()) ok = true;
+            else ok = camChars[o.idx]->writeValue(o.data.data(), o.data.size(), o.withResponse);
+        }
+        if (!ok) {
+            retryAfter = millis() + 50; // buffers full
+            return;
+        }
+        outgoing.pop_front();
+    }
+}
+
 static void notifyTap(const Duml::Frame &f) {
     std::vector<uint8_t> b = Duml::encode(f);
-    if (tapConnected && tapChars[1]) tapChars[1]->notify(b.data(), b.size());
+    send(true, 1, b.data(), b.size(), false, true);
 }
 
 // True if we answered the frame ourselves (it must not reach the camera)
@@ -145,12 +194,11 @@ static bool intercept(const Duml::Frame &f) {
 
 static void forwardToCamera(const Packet &p, int idx) {
     std::vector<Duml::Frame> frames = fromTap[idx].append(p.data.data(), p.data.size());
-    bool camUp = camChars[idx] && camClient && camClient->isConnected();
     if (frames.empty()) {
         // Non-DUML writes (the 01 00 arm on fff4) go through raw; otherwise wait for the rest
         if (p.data.size() <= 4) {
             fromTap[idx].reset();
-            if (camUp) camChars[idx]->writeValue(p.data.data(), p.data.size(), p.withResponse);
+            send(false, idx, p.data.data(), p.data.size(), p.withResponse);
         }
         return;
     }
@@ -158,7 +206,7 @@ static void forwardToCamera(const Packet &p, int idx) {
         logWifiFrames("T>C", f);
         if (intercept(f)) continue;
         std::vector<uint8_t> b = Duml::encode(f);
-        if (camUp) camChars[idx]->writeValue(b.data(), b.size(), p.withResponse);
+        send(false, idx, b.data(), b.size(), p.withResponse);
     }
 }
 
@@ -179,6 +227,46 @@ static int sock = -1;
 static sockaddr_in tapAddr{}; // learned from FrameTap's first packet
 static volatile uint32_t lastTapPacket = 0;
 static volatile uint32_t bytesToCam = 0, bytesToTap = 0, videoPkts = 0, videoMissing = 0;
+static volatile uint32_t tapCmds = 0; // FrameTap command packets (type 5) per second
+
+// Header capture for working out where sequence numbers live (temporary):
+// the receiver copies a few packets of each direction/type, update() prints them
+struct Sample {
+    uint32_t ms;
+    bool toCamera;
+    uint16_t len;
+    uint8_t head[40];
+};
+static const int SAMPLE_SLOTS = 400;
+static Sample *samples = nullptr;
+static volatile uint16_t samplesWritten = 0;
+static uint16_t samplesPrinted = 0;
+static uint8_t sampleCount[2][8] = {};
+
+static void sampleHeader(const Slot &slot) {
+    if (!samples || slot.len < 8 || samplesWritten >= SAMPLE_SLOTS) return;
+    uint8_t type = slot.data[6] & 7;
+    uint8_t &count = sampleCount[slot.toCamera][type];
+    if (count >= (type == 0x02 ? 10 : 30)) return;
+    count++;
+    Sample &s = samples[samplesWritten];
+    s.ms = millis();
+    s.toCamera = slot.toCamera;
+    s.len = slot.len;
+    memcpy(s.head, slot.data, min<size_t>(slot.len, sizeof(s.head)));
+    samplesWritten = samplesWritten + 1;
+}
+
+static void printSamples() {
+    for (int n = 0; n < 8 && samplesPrinted < samplesWritten; n++, samplesPrinted++) {
+        const Sample &s = samples[samplesPrinted];
+        char hex[3 * sizeof(s.head) + 1];
+        int len = min<int>(s.len, sizeof(s.head));
+        for (int i = 0; i < len; i++) sprintf(hex + 3 * i, "%02X ", s.head[i]);
+        hex[3 * len] = 0;
+        Serial.printf("SAMPLE %lu %s t%d len%u %s\n", s.ms, s.toCamera ? "T>C" : "C>T", s.head[6], s.len, hex);
+    }
+}
 
 static void receiveTask(void *) {
     uint16_t next = 0;
@@ -202,8 +290,117 @@ static void receiveTask(void *) {
             if (lastSeq < 0 || d > 0) lastSeq = seq;
             videoPkts++;
         }
+        if (slot.toCamera && n >= 8 && slot.data[6] == 0x05) tapCmds++;
+        sampleHeader(slot);
         if (xQueueSend(ready, &next, 0) != pdTRUE) continue; // ring full: reuse this slot
         next = (next + 1) % RING_SLOTS;
+    }
+}
+
+// ---------- Command sequence translation ----------
+// The camera numbers each packet type separately. Only the command stream
+// (type 5, steps of 8) will be shared with the board, so FrameTap's command
+// numbers are mapped onto one camera-side sequence and every field that
+// echoes them is mapped back. Video and the camera's own numbering pass
+// unchanged. Runs only in sendTask, so no locking.
+//
+// Fields: t5 seq at 4-5 (in the xor) and 10-11; t4 short form pair at 24-27;
+// t1 pair at 24-27; t3 ack at 8-9.
+
+static const bool XLAT = false; // off: checking whether the translator stalls FrameTap
+
+struct SeqMap {
+    uint16_t tap, cam; // multiples of 8
+    bool fromTap;
+};
+static const int MAP_SLOTS = 256;
+static SeqMap seqMap[MAP_SLOTS];
+static int mapCount = 0, mapNext = 0;
+static uint16_t camNext = 0;
+static volatile uint32_t xlatUp = 0, xlatResend = 0, xlatDown = 0;
+
+static uint16_t rd16(const uint8_t *p) { return p[0] | (p[1] << 8); }
+static void wr16(uint8_t *p, uint16_t v) { p[0] = v; p[1] = v >> 8; }
+
+static void resetMap() { mapCount = mapNext = 0; }
+
+static const SeqMap *findTap(uint16_t tap) {
+    for (int i = 0; i < mapCount; i++) {
+        const SeqMap &m = seqMap[(mapNext - 1 - i + MAP_SLOTS) % MAP_SLOTS];
+        if (m.fromTap && m.tap == tap) return &m;
+    }
+    return nullptr;
+}
+
+// Echoed numbers aren't always ones that were sent (telemetry also reports
+// "next expected"), so both directions map by offset from the nearest
+// FrameTap entry at or below the value, skipping the board's packets in between.
+// Low 3 bits are kept, they mark resends.
+
+// FrameTap's number -> camera's
+static uint16_t tapToCam(uint16_t v) {
+    uint16_t key = v & ~7;
+    uint16_t boards = 0;
+    for (int i = 0; i < mapCount; i++) {
+        const SeqMap &m = seqMap[(mapNext - 1 - i + MAP_SLOTS) % MAP_SLOTS];
+        if (!m.fromTap) { boards++; continue; }
+        if ((int16_t)(m.tap - key) > 0) { boards = 0; continue; }
+        // beyond the newest FrameTap packet the board's later ones still count
+        return (m.cam + (uint16_t)(key - m.tap) + (key == m.tap ? 0 : 8 * boards)) | (v & 7);
+    }
+    return v;
+}
+
+// Camera's number -> FrameTap's
+static uint16_t camToTap(uint16_t v) {
+    uint16_t key = v & ~7;
+    uint16_t boards = 0;
+    for (int i = 0; i < mapCount; i++) {
+        const SeqMap &m = seqMap[(mapNext - 1 - i + MAP_SLOTS) % MAP_SLOTS];
+        if ((int16_t)(m.cam - key) > 0) continue;
+        if (!m.fromTap) { boards++; continue; }
+        return (m.tap + (uint16_t)(key - m.cam - 8 * boards)) | (v & 7);
+    }
+    return v;
+}
+
+static uint16_t assign(uint16_t tap, bool fromTap) {
+    if (mapCount == 0) camNext = tap; // first command: identity, so FrameTap alone is unchanged
+    uint16_t cam = camNext;
+    camNext += 8;
+    seqMap[mapNext] = SeqMap{tap, cam, fromTap};
+    mapNext = (mapNext + 1) % MAP_SLOTS;
+    if (mapCount < MAP_SLOTS) mapCount++;
+    return cam;
+}
+
+static void translate(Slot &slot) {
+    uint8_t *d = slot.data;
+    if (slot.len < 8) return;
+    uint8_t type = d[6];
+    if (slot.toCamera) {
+        if (type == 0x00) resetMap(); // FrameTap (re)opening its session
+        else if (type == 0x05 && slot.len >= 12) {
+            uint16_t seq = rd16(d + 4), key = seq & ~7;
+            const SeqMap *m = findTap(key);
+            uint16_t cam = m ? m->cam : assign(key, true);
+            if (m) xlatResend++;
+            else xlatUp++;
+            cam |= seq & 7;
+            wr16(d + 4, cam);
+            if (rd16(d + 10) == seq) wr16(d + 10, cam);
+            d[7] = d[0] ^ d[1] ^ d[2] ^ d[3] ^ d[4] ^ d[5] ^ d[6];
+        } else if (type == 0x04 && slot.len == 34) {
+            wr16(d + 24, tapToCam(rd16(d + 24)));
+            wr16(d + 26, tapToCam(rd16(d + 26)));
+        }
+    } else if (type == 0x03 && slot.len >= 10) {
+        wr16(d + 8, camToTap(rd16(d + 8)));
+        xlatDown++;
+    } else if (type == 0x01 && slot.len >= 28) {
+        wr16(d + 24, camToTap(rd16(d + 24)));
+        wr16(d + 26, camToTap(rd16(d + 26)));
+        xlatDown++;
     }
 }
 
@@ -217,6 +414,7 @@ static void sendTask(void *) {
         if (xQueueReceive(ready, &idx, portMAX_DELAY) != pdTRUE) continue;
         Slot &slot = ring[idx];
         if (!slot.toCamera && tapAddr.sin_port == 0) continue;
+        if (XLAT) translate(slot);
         const sockaddr_in *to = slot.toCamera ? &cam : &tapAddr;
         sendto(sock, slot.data, slot.len, 0, (const sockaddr *)to, sizeof(*to));
         if (slot.toCamera) bytesToCam += slot.len;
@@ -279,6 +477,7 @@ void start(NimBLEClient *camera, NimBLERemoteCharacteristic *const chars[3], con
     // One radio for both: give Wi-Fi (live view) the larger share of airtime
     esp_coex_preference_set(ESP_COEX_PREFER_WIFI);
     ring = (Slot *)ps_malloc(sizeof(Slot) * RING_SLOTS);
+    samples = (Sample *)ps_malloc(sizeof(Sample) * SAMPLE_SLOTS);
     ready = xQueueCreate(RING_SLOTS - 2, sizeof(uint16_t)); // spare: the slot being sent + received into
     sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     sockaddr_in local{};
@@ -320,10 +519,15 @@ void update() {
         if (p.dir == TO_CAMERA) forwardToCamera(p, idx);
         else {
             for (const Duml::Frame &f : toTap[idx].append(p.data.data(), p.data.size())) logWifiFrames("C>T", f);
-            if (tapConnected && tapChars[idx]) tapChars[idx]->notify(p.data.data(), p.data.size());
+            send(true, idx, p.data.data(), p.data.size());
         }
     }
+    static bool wasTapConnected = false;
+    if (wasTapConnected && !tapConnected) dropFromTap();
+    wasTapConnected = tapConnected;
+    flushOutgoing();
     if (enabled) pollTcp();
+    printSamples();
 
     // Quiet BLE while FrameTap is on Wi-Fi: no advertising, slow camera connection
     static bool quiet = false;
@@ -352,8 +556,11 @@ void update() {
         lastVideoMissing = videoMissing;
         bytesToTap = bytesToCam = videoPkts = videoMissing = 0;
         if (tapOnWifi())
-            Serial.printf("relay: FrameTap Wi-Fi  to cam %lu KB/s, to FrameTap %lu KB/s, video %lu pkt/s\n",
-                          lastKbToCam, lastKbToTap, lastVideoPkts);
+            Serial.printf("relay: FrameTap Wi-Fi  to cam %lu KB/s, to FrameTap %lu KB/s, video %lu pkt/s, "
+                          "cmds %lu, ble queue %u, xlat up %lu resend %lu down %lu\n",
+                          lastKbToCam, lastKbToTap, lastVideoPkts, tapCmds, (unsigned)outgoing.size(), xlatUp,
+                          xlatResend, xlatDown);
+        xlatUp = xlatResend = xlatDown = tapCmds = 0;
     }
 }
 
@@ -363,6 +570,7 @@ void setEnabled(bool on) {
     if (!on) {
         NimBLEDevice::getAdvertising()->stop();
         if (server && tapConnected) server->disconnect(server->getPeerInfo(0).getConnHandle());
+        outgoing.clear();
         tapTcp.stop();
         camTcp.stop();
         tapAddr = sockaddr_in{};
