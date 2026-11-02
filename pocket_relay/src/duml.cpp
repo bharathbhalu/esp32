@@ -1,0 +1,140 @@
+// Ported from OpenCine (Apache License 2.0); see duml.h.
+#include "duml.h"
+
+namespace Duml {
+
+// Reflected CRC-8, init 0x77, poly 0x8C
+uint8_t crc8(const uint8_t *data, size_t len) {
+    uint8_t c = 0x77;
+    for (size_t i = 0; i < len; i++) {
+        c ^= data[i];
+        for (int b = 0; b < 8; b++) c = (c & 1) ? (c >> 1) ^ 0x8C : c >> 1;
+    }
+    return c;
+}
+
+// Reflected CRC-16, init 0x3692, poly 0x8408
+uint16_t crc16(const uint8_t *data, size_t len) {
+    uint16_t c = 0x3692;
+    for (size_t i = 0; i < len; i++) {
+        c ^= data[i];
+        for (int b = 0; b < 8; b++) c = (c & 1) ? (c >> 1) ^ 0x8408 : c >> 1;
+    }
+    return c;
+}
+
+std::vector<uint8_t> encode(const Frame &f) {
+    size_t total = 13 + f.payload.size();
+    std::vector<uint8_t> b;
+    b.reserve(total);
+    b.push_back(0x55);
+    b.push_back(total & 0xFF);
+    b.push_back((1 << 2) | ((total >> 8) & 0x03)); // version 1 + high length bits
+    b.push_back(crc8(b.data(), 3));
+    b.push_back(f.sender);
+    b.push_back(f.receiver);
+    b.push_back(f.seq & 0xFF);
+    b.push_back(f.seq >> 8);
+    b.push_back(f.flags);
+    b.push_back(f.cmdSet);
+    b.push_back(f.cmdId);
+    b.insert(b.end(), f.payload.begin(), f.payload.end());
+    uint16_t c = crc16(b.data(), b.size());
+    b.push_back(c & 0xFF);
+    b.push_back(c >> 8);
+    return b;
+}
+
+std::vector<uint8_t> packString(const String &s) {
+    std::vector<uint8_t> out;
+    out.push_back((uint8_t)s.length());
+    for (size_t i = 0; i < s.length(); i++) out.push_back((uint8_t)s[i]);
+    return out;
+}
+
+String unpackStatusString(const std::vector<uint8_t> &p) {
+    if (p.size() < 2) return "";
+    size_t end = min(p.size(), (size_t)(2 + p[1]));
+    String s;
+    for (size_t i = 2; i < end; i++) s += (char)p[i];
+    return s;
+}
+
+String hex(const std::vector<uint8_t> &b, size_t limit) {
+    if (b.empty()) return "-";
+    String s;
+    char h[4];
+    for (size_t i = 0; i < b.size() && i < limit; i++) {
+        snprintf(h, sizeof(h), i ? " %02X" : "%02X", b[i]);
+        s += h;
+    }
+    if (b.size() > limit) s += "...";
+    return s;
+}
+
+std::vector<Frame> Assembler::append(const uint8_t *data, size_t len) {
+    std::vector<Frame> out;
+    if (len > 4096) {
+        pending.clear();
+        return out;
+    }
+    if (pending.size() + len > 4096) pending.clear();
+    pending.insert(pending.end(), data, data + len);
+    while (pending.size() >= 4) {
+        if (pending[0] != 0x55 || (pending[2] >> 2) != 1 || crc8(pending.data(), 3) != pending[3]) {
+            pending.erase(pending.begin());
+            continue;
+        }
+        size_t length = pending[1] | ((pending[2] & 3) << 8);
+        if (length < 13) {
+            pending.erase(pending.begin());
+            continue;
+        }
+        if (pending.size() < length) break;
+        uint16_t checksum = pending[length - 2] | (pending[length - 1] << 8);
+        if (crc16(pending.data(), length - 2) != checksum) {
+            pending.erase(pending.begin());
+            continue;
+        }
+        Frame f;
+        f.sender = pending[4];
+        f.receiver = pending[5];
+        f.seq = pending[6] | (pending[7] << 8);
+        f.flags = pending[8];
+        f.cmdSet = pending[9];
+        f.cmdId = pending[10];
+        f.payload.assign(pending.begin() + 11, pending.begin() + length - 2);
+        out.push_back(f);
+        pending.erase(pending.begin(), pending.begin() + length);
+    }
+    return out;
+}
+
+static Frame make(uint8_t receiver, uint16_t seq, uint8_t set, uint8_t cmd, std::vector<uint8_t> payload,
+                  uint8_t flags = FLAG_REQUEST) {
+    Frame f;
+    f.receiver = receiver;
+    f.seq = seq;
+    f.flags = flags;
+    f.cmdSet = set;
+    f.cmdId = cmd;
+    f.payload = payload;
+    return f;
+}
+
+Frame sessionWake() { return make(RX_SESSION, 0x802B, 0x00, 0x2B, {0x04, 0x00}); }
+Frame sessionKeepalive() { return make(RX_SESSION, 0x802B, 0x00, 0x2B, {0x01, 0x01}); }
+
+Frame setPairingPin(const char *pin) {
+    std::vector<uint8_t> p = packString(IDENTIFIER);
+    std::vector<uint8_t> pinBytes = packString(pin);
+    p.insert(p.end(), pinBytes.begin(), pinBytes.end());
+    return make(RX_WIFI, 0x8092, 0x07, 0x45, p);
+}
+
+Frame pairApprovalAck(uint16_t seq) { return make(RX_WIFI, seq, 0x07, 0x46, {0x00}, FLAG_RESPONSE); }
+Frame wakeAccessPoint() { return make(RX_1C, 0x8053, 0x53, 0x10, {0, 0, 0, 0}); }
+Frame getWifiSsid() { return make(RX_WIFI, 0x8007, 0x07, 0x07, {}); }
+Frame getWifiPassword() { return make(RX_WIFI, 0x800E, 0x07, 0x0E, {}); }
+
+} // namespace Duml

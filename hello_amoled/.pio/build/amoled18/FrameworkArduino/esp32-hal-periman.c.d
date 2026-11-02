@@ -1,0 +1,23 @@
+.pio/build/amoled18/FrameworkArduino/esp32-hal-periman.c.o: \
+ /Users/bharathkumargubbala/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp32-hal-periman.c \
+ /Users/bharathkumargubbala/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp32-hal-log.h \
+ /Users/bharathkumargubbala/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/qio_opi/include/sdkconfig.h \
+ /Users/bharathkumargubbala/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/esp_timer/include/esp_timer.h \
+ /Users/bharathkumargubbala/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/esp_common/include/esp_err.h \
+ /Users/bharathkumargubbala/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/esp_common/include/esp_compiler.h \
+ /Users/bharathkumargubbala/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/esp_hw_support/include/esp_etm.h \
+ /Users/bharathkumargubbala/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/esp_rom/esp32s3/include/esp32s3/rom/ets_sys.h \
+ /Users/bharathkumargubbala/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/soc/esp32s3/include/soc/soc.h \
+ /Users/bharathkumargubbala/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/esp_common/include/esp_assert.h \
+ /Users/bharathkumargubbala/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/esp_common/include/esp_bit_defs.h \
+ /Users/bharathkumargubbala/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/soc/esp32s3/register/soc/reg_base.h \
+ /Users/bharathkumargubbala/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/log/include/esp_log.h \
+ /Users/bharathkumargubbala/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/esp_rom/include/esp_rom_sys.h \
+ /Users/bharathkumargubbala/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/soc/esp32s3/include/soc/reset_reasons.h \
+ /Users/bharathkumargubbala/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/log/include/esp_log_level.h \
+ /Users/bharathkumargubbala/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/log/include/esp_log_color.h \
+ /Users/bharathkumargubbala/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/log/include/esp_log_buffer.h \
+ /Users/bharathkumargubbala/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/log/include/esp_log_timestamp.h \
+ /Users/bharathkumargubbala/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp32-hal-periman.h \
+ /Users/bharathkumargubbala/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/soc/esp32s3/include/soc/soc_caps.h \
+ /Users/bharathkumargubbala/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/soc/esp32s3/include/soc/mpu_caps.h
