@@ -265,10 +265,12 @@ static void receiveTask(void *) {
 // shifted down again. Until the board injects, nothing is touched at all.
 // Video and the camera's own numbering pass unchanged. Runs only in sendTask.
 //
-// Fields: t5 seq at 4-5 (in the xor), 10-11 and 12-13, counter at 16; t4 short form
+// Fields: t5 seq at 4-5 (in the xor), 10-11, 12-13 and 14-15, counter at 16; t4 short form
 // pair at 24-27; t1 pair at 24-27; t3 ack at 8-9.
 
-static const int INJ_SLOTS = 64;
+// Room for a stick stream until foldOld() retires entries (~14 s); a full ring
+// would retire one early and shift FrameTap's older numbers wrongly
+static const int INJ_SLOTS = 1024;
 static uint16_t injTapAfter[INJ_SLOTS]; // FrameTap's last command number when the board's went in
 static uint16_t injCam[INJ_SLOTS];      // the board command's camera number
 static int injCount = 0, injNext = 0;
@@ -276,6 +278,7 @@ static uint32_t injEvicted = 0;         // older injections, counted in full
 
 static uint16_t tapSession = 0, tapLastSeq = 0, tapLastAck = 0, camLastSeq = 0;
 static uint8_t camLastCounter = 0;
+static uint8_t tapLast12[4] = {}; // bytes 12-15 of FrameTap's latest command, in camera numbers
 static bool tapSeen = false, camSeen = false;
 static volatile uint32_t xlatUp = 0, xlatDown = 0, injected = 0;
 
@@ -298,7 +301,10 @@ void setObserver(void (*fn)(const uint8_t *, size_t)) { observer = fn; }
 static uint16_t rd16(const uint8_t *p) { return p[0] | (p[1] << 8); }
 static void wr16(uint8_t *p, uint16_t v) { p[0] = v; p[1] = v >> 8; }
 
-static void resetShare() { injCount = injNext = 0, injEvicted = 0, tapSeen = camSeen = false; }
+static void resetShare() {
+    injCount = injNext = 0, injEvicted = 0, tapSeen = camSeen = false;
+    memset(tapLast12, 0, sizeof(tapLast12));
+}
 
 // Numbers are 16-bit and FrameTap uses ~560 a second, so an injection compared
 // against numbers half the range away (~58 s later) would flip sides. Once
@@ -314,10 +320,15 @@ static void foldOld() {
 }
 
 // Board commands that precede FrameTap's command number v
+// The live entries are the last injCount written to the ring, ending before
+// injNext - not slots 0..injCount-1, which after folding are already in injEvicted
+// (reading those counted a board command twice and opened a gap)
+static int injSlot(int i) { return (injNext - injCount + i + INJ_SLOTS) % INJ_SLOTS; }
+
 static uint32_t boardsBeforeTap(uint16_t v) {
     uint32_t n = injEvicted;
     for (int i = 0; i < injCount; i++)
-        if ((int16_t)((v & ~7) - injTapAfter[i]) > 0) n++;
+        if ((int16_t)((v & ~7) - injTapAfter[injSlot(i)]) > 0) n++;
     return n;
 }
 
@@ -325,7 +336,7 @@ static uint32_t boardsBeforeTap(uint16_t v) {
 static uint32_t boardsUpToCam(uint16_t v) {
     uint32_t n = injEvicted;
     for (int i = 0; i < injCount; i++)
-        if ((int16_t)((v & ~7) - injCam[i]) >= 0) n++;
+        if ((int16_t)((v & ~7) - injCam[injSlot(i)]) >= 0) n++;
     return n;
 }
 
@@ -360,18 +371,19 @@ static void translate(Slot &slot) {
             foldOld();
             uint32_t n = injCount || injEvicted ? boardsBeforeTap(seq) : 0;
             if (n) {
-                // All three number fields move together. A large command goes out
-                // in parts: seq at 4-5 is the part's (low bits set), 10-11 the
-                // command's, 12-13 a previous part's (0 when not split)
-                uint16_t shift = 8 * n;
-                wr16(d + 4, seq + shift);
-                wr16(d + 10, rd16(d + 10) + shift);
-                if (rd16(d + 12)) wr16(d + 12, rd16(d + 12) + shift);
+                // Four number fields, each converted on its own: in a split command
+                // or a resend (low bits set) they hold different command numbers
+                // (the packet's, FrameTap's latest, earlier ones), so one shared
+                // shift - or skipping 14-15 - made the camera reject every resend
+                wr16(d + 4, tapToCam(seq));
+                for (int at = 10; at <= 14; at += 2)
+                    if (rd16(d + at)) wr16(d + at, tapToCam(rd16(d + at)));
                 d[16] += n;
                 d[7] = d[0] ^ d[1] ^ d[2] ^ d[3] ^ d[4] ^ d[5] ^ d[6];
                 xlatUp++;
             }
             uint16_t cam = rd16(d + 4) & ~7;
+            if ((seq & 7) == 0) memcpy(tapLast12, d + 12, 4); // a new command (not a resend)
             // First of a session taken as is: a 16-bit "later than" test against
             // the initial 0 fails for anything from 0x8000 up
             if (!camSeen || (int16_t)(cam - camLastSeq) >= 0) {
@@ -410,10 +422,16 @@ struct Pending {
     uint32_t sentAt;
     uint8_t pkt[8 + 12 + 256];
 };
-static const int PENDING_SLOTS = 8;
+static const int PENDING_SLOTS = 64;
 static Pending pending[PENDING_SLOTS];
 static bool pendingUsed[PENDING_SLOTS] = {};
 static volatile uint32_t injResent = 0;
+
+static bool pendingFree() {
+    for (int i = 0; i < PENDING_SLOTS; i++)
+        if (!pendingUsed[i]) return true;
+    return false;
+}
 
 static void confirmInjections(uint16_t camAck) {
     for (int i = 0; i < PENDING_SLOTS; i++)
@@ -449,7 +467,9 @@ static void sendInjection(const Injection &inj, const sockaddr_in &cam) {
     pkt[7] = pkt[0] ^ pkt[1] ^ pkt[2] ^ pkt[3] ^ pkt[4] ^ pkt[5] ^ pkt[6];
     wr16(pkt + 8, tapLastAck);
     wr16(pkt + 10, seq);
-    memset(pkt + 12, 0, 4);
+    // Same "oldest unconfirmed" fields as FrameTap's latest command: zeros there
+    // once FrameTap had resent anything made the camera refuse the board's packet
+    memcpy(pkt + 12, tapLast12, 4);
     pkt[16] = counter;
     pkt[17] = 0x01;
     pkt[18] = pkt[19] = 0;
@@ -544,7 +564,10 @@ static void sendTask(void *) {
     while (true) {
         // Held until FrameTap's session is running (it pairs a few seconds before
         // its Wi-Fi comes up, and the board's own session is already closed)
-        if (tapSeen && camSeen && xQueueReceive(injectQ, &inj, 0) == pdTRUE) sendInjection(inj, cam);
+        // ...and only with a resend slot free: an untracked one that got lost
+        // would leave a gap nobody fills (a stick stream once froze the session)
+        if (tapSeen && camSeen && pendingFree() && xQueueReceive(injectQ, &inj, 0) == pdTRUE)
+            sendInjection(inj, cam);
         resendInjections(cam);
         if (xQueueReceive(ready, &idx, pdMS_TO_TICKS(20)) != pdTRUE) continue;
         Slot &slot = ring[idx];

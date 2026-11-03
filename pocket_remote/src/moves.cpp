@@ -28,7 +28,7 @@ struct Waypoint {
     uint32_t t; // ms from the start of the take
 };
 
-enum Phase { IDLE, PREP, HOLD, RUN };
+enum Phase { IDLE, FRONT, PREP, HOLD, RUN };
 
 static Waypoint path[MAX_SAMPLES];
 static int pathLen = 0;
@@ -37,6 +37,16 @@ static uint32_t phaseStart = 0;
 static int legIndex = 0;
 static bool startedVideo = false, wantVideo = false;
 static char playName[16];
+
+// Preset pans are relative to the front, not fixed joint angles: the joint's
+// front can sit anywhere (near 180 after a calibration), and a fixed -45..45 then
+// swung the gimbal round the back. With faceFront the camera recenters first
+// (its own 04/4C) and the front is read from where it settles.
+static bool faceFront = false;
+static const uint32_t FRONT_MS = 1500;
+static int pendingPreset = -1;
+static uint32_t pendingDuration = 0;
+static bool pendingVideo = false;
 
 // Recording buffer, stored as tenths of a degree
 static int16_t recBuf[MAX_SAMPLES][2];
@@ -122,25 +132,36 @@ static void start(Camera &cam, const char *name, bool withVideo) {
     phase = PREP;
 }
 
+void setFaceFront(bool on) { faceFront = on; }
+
+// Preset waypoints are pan offsets from front (tilt stays absolute)
+static void runPreset(Camera &cam, int preset, uint32_t durationMs, bool withVideo, float front) {
+    const Preset &p = PRESETS[preset];
+    pathLen = p.count;
+    for (int i = 0; i < p.count; i++)
+        path[i] = {constrain(front + p.points[i][0], GIMBAL_YAW_MIN, GIMBAL_YAW_MAX), p.points[i][1],
+                   (uint32_t)(durationMs * i / (p.count - 1))};
+    start(cam, p.name, withVideo);
+}
+
 void playPreset(Camera &cam, int preset, uint32_t durationMs, bool withVideo) {
     const Preset &p = PRESETS[preset];
     if (p.count == 1) {
-        // Center: a two-point path from here, timed by the duration
-        path[0] = {cam.gimbalYaw(), cam.gimbalPitch(), 0};
-        path[1] = {p.points[0][0], p.points[0][1], durationMs};
-        pathLen = 2;
-        strlcpy(playName, p.name, sizeof(playName));
-        wantVideo = withVideo;
-        startedVideo = false;
-        legIndex = 0;
-        phaseStart = millis();
-        phase = RUN;
+        // Center: the camera's own recenter knows where its front is
+        cam.gimbalRecenter();
         return;
     }
-    pathLen = p.count;
-    for (int i = 0; i < p.count; i++)
-        path[i] = {p.points[i][0], p.points[i][1], (uint32_t)(durationMs * i / (p.count - 1))};
-    start(cam, p.name, withVideo);
+    if (faceFront) {
+        strlcpy(playName, p.name, sizeof(playName));
+        pendingPreset = preset;
+        pendingDuration = durationMs;
+        pendingVideo = withVideo;
+        cam.gimbalRecenter();
+        phaseStart = millis();
+        phase = FRONT;
+        return;
+    }
+    runPreset(cam, preset, durationMs, withVideo, cam.gimbalYaw()); // around where it points now
 }
 
 void playSlot(Camera &cam, int slot, bool withVideo) {
@@ -158,6 +179,7 @@ void playSlot(Camera &cam, int slot, bool withVideo) {
 bool playing() { return phase != IDLE; }
 
 String status() {
+    if (phase == FRONT) return String(playName) + "  facing front...";
     if (phase == PREP) return String(playName) + "  to start...";
     if (phase == HOLD) return String(playName) + "  get ready";
     if (phase != RUN) return "";
@@ -197,6 +219,9 @@ void update(Camera &cam) {
     }
     uint32_t elapsed = now - phaseStart;
     switch (phase) {
+    case FRONT:
+        if (elapsed >= FRONT_MS) runPreset(cam, pendingPreset, pendingDuration, pendingVideo, cam.gimbalYaw());
+        break;
     case PREP:
         if (elapsed >= PREP_MS) {
             phase = HOLD;

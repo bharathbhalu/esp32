@@ -420,32 +420,63 @@ int RealCamera::storageUsed() const {
     return 100 - (int)(100L * st.storageFreeMb / st.storageTotalMb);
 }
 
+// The gimbal's native pitch for a display tilt, re-derived from the live pose:
+// native falls 1 deg per 1 deg of look-up tilt (OpenPocketCine programmed moves)
+static float nativeFor(const CameraState &st, float tilt) {
+    if (!st.gimbalMs || millis() - st.gimbalMs > 1000) return NAN; // no fresh attitude: estimate
+    return st.gimbalNative - (tilt - st.gimbalTilt);
+}
+
+static bool attitudeFresh(const CameraState &st) { return st.gimbalMs && millis() - st.gimbalMs < 1000; }
+
+// The camera reports pan in -180..180; the board's range is -48..225 (front of the
+// joint can sit near 180, e.g. after a calibration), so fold it across
+static float boardPan(float pan) { return pan < GIMBAL_YAW_MIN ? pan + 360 : pan; }
+
+float RealCamera::gimbalYaw() const {
+    return attitudeFresh(datalink_.state()) ? boardPan(datalink_.state().gimbalYaw) : yaw_;
+}
+float RealCamera::gimbalPitch() const {
+    return attitudeFresh(datalink_.state()) ? datalink_.state().gimbalTilt : pitch_;
+}
+
+static uint32_t timedMoveUntil = 0; // a 04/14 move in progress (cancelled by gimbalSpeed(0, 0))
+
+// Stick: the camera's own joystick command, like OpenCine/OpenPocketCine. The
+// camera ramps and limits it itself; no pitch conversion that could fight the
+// live pose. Half throw keeps it gentle at the top of the board's sensitivity.
 void RealCamera::gimbalSpeed(float yaw, float pitch) {
-    // Integrate the stick into a target and stream absolute targets (throttled).
-    uint32_t now = millis();
-    float dt = lastGimbal_ ? (now - lastGimbal_) / 1000.0f : 0;
-    lastGimbal_ = now;
-    if (dt > 0 && dt < 0.5f) {
-        yaw_ = constrain(yaw_ + yaw * 90 * dt, GIMBAL_YAW_MIN, GIMBAL_YAW_MAX);
-        pitch_ = constrain(pitch_ + pitch * 60 * dt, GIMBAL_PITCH_MIN, GIMBAL_PITCH_MAX);
-    }
-    if (link_ != Link::Connected) return;
+    static const float THROW = 550 * 0.5f;
+    static bool held = false;
     static uint32_t lastSend = 0;
+    if (link_ != Link::Connected) return;
+    uint32_t now = millis();
     bool moving = yaw != 0 || pitch != 0;
-    static bool wasMoving = false;
-    if (moving && now - lastSend > 150) {
-        lastSend = now;
-        datalink_.send(Duml::gimbalTarget(yaw_, pitch_, 200)); // reach the target in ~0.2 s
-    } else if (!moving && wasMoving) {
+    if (moving) {
+        // OpenCine streams every 40 ms; inside FrameTap's session every command is
+        // shared with it, so go lighter there
+        if (now - lastSend >= (handedOff ? 100u : 40u)) {
+            lastSend = now;
+            held = true;
+            timedMoveUntil = 0; // the stick takes over from any move
+            datalink_.send(Duml::gimbalStick(1024 + lroundf(constrain(pitch, -1.0f, 1.0f) * THROW),
+                                             1024 + lroundf(constrain(yaw, -1.0f, 1.0f) * THROW)));
+        }
+    } else if (held) {
+        held = false;
+        datalink_.send(Duml::gimbalStick(1024, 1024)); // rest
+    } else if (timedMoveUntil && now < timedMoveUntil) {
+        timedMoveUntil = 0;
         datalink_.send(Duml::gimbalTimedStop());
     }
-    wasMoving = moving;
 }
 
 void RealCamera::gimbalMoveTo(float yaw, float pitch, uint32_t durationMs) {
+    timedMoveUntil = millis() + durationMs;
     yaw_ = constrain(yaw, GIMBAL_YAW_MIN, GIMBAL_YAW_MAX);
     pitch_ = constrain(pitch, GIMBAL_PITCH_MIN, GIMBAL_PITCH_MAX);
-    if (link_ == Link::Connected) datalink_.send(Duml::gimbalTarget(yaw_, pitch_, durationMs));
+    if (link_ == Link::Connected)
+        datalink_.send(Duml::gimbalTarget(yaw_, pitch_, durationMs, nativeFor(datalink_.state(), pitch_)));
 }
 
 void RealCamera::gimbalRecenter() {

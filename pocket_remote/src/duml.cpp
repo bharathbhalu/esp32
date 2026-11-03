@@ -167,14 +167,16 @@ Frame setFocusMode(uint8_t v) { return cam(0x24, {v}); }
 // 0x04/0x14 native timed target (OpenCine gimbalTimedTarget). Exact 8-byte layout:
 // [yaw*10 i16-LE][00 00][nativePitch*10 i16-LE][0x05 abs mode][duration in 0.1s].
 // Uses the NOTIFY flag (0x00), receiver = gimbal (type 4, id 0). duration 0.1-25.5 s.
-Frame gimbalTarget(float yawDeg, float pitchDeg, uint32_t durationMs) {
+Frame gimbalTarget(float yawDeg, float pitchDeg, uint32_t durationMs, float nativeDeg) {
     // Final safety clamp to the gimbal's reachable range (pan -48..225, tilt -44..70)
     yawDeg = constrain(yawDeg, -48.0f, 225.0f);
     pitchDeg = constrain(pitchDeg, -44.0f, 70.0f);
     // Display tilt -> native pitch: the gimbal reads ~180 deg at level, falling 1 deg
     // per 1 deg of look-up tilt. So level (display 0) is native 180, not 0, which is
     // why a pitch-0 pan was looking straight down. Wrap into (-180, 180].
-    float nativeDeg = 180.0f - pitchDeg;
+    // Only an estimate: the reference moves (e.g. after a camera reset), so callers
+    // pass one derived from the live attitude when they have it
+    if (isnan(nativeDeg)) nativeDeg = 180.0f - pitchDeg;
     while (nativeDeg > 180.0f) nativeDeg -= 360.0f;
     while (nativeDeg <= -180.0f) nativeDeg += 360.0f;
     int16_t yaw = (int16_t)lroundf(yawDeg * 10);
@@ -186,6 +188,14 @@ Frame gimbalTarget(float yawDeg, float pitchDeg, uint32_t durationMs) {
     return f;
 }
 // Relative zero target over 100 ms: cancels the current timed move.
+Frame gimbalStick(int axis0, int axis1) {
+    uint16_t a0 = constrain(axis0, 474, 1574), a1 = constrain(axis1, 474, 1574);
+    Frame f = make((uint8_t)((0 << 5) | 0x04), 0, 0x04, 0x01, {}, FLAG_NOTIFY);
+    f.payload = {(uint8_t)(a0 & 0xFF), (uint8_t)(a0 >> 8), 0x00, 0x00, (uint8_t)(a1 & 0xFF), (uint8_t)(a1 >> 8),
+                 0x00, 0x80, 0x22, 0x00};
+    return f;
+}
+
 Frame gimbalRecenterCmd() { return make((uint8_t)((0 << 5) | 0x04), 0, 0x04, 0x4C, {0xFE, 0x08}); }
 Frame gimbalTimedStop() {
     Frame f = make((uint8_t)((0 << 5) | 0x04), 0, 0x04, 0x14, {0, 0, 0, 0, 0, 0, 0x04, 1}, FLAG_NOTIFY);

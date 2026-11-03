@@ -26,6 +26,9 @@ struct CameraState {
     int wbMode = -1;       // 0x00 auto, 0x06 custom
     int wbKelvin = -1;
     int colorRaw = -1;     // color profile byte
+    // Gimbal attitude from the 50-byte 0x04/0x05 push (OpenCine/OpenPocketCine layout)
+    float gimbalYaw = 0, gimbalTilt = 0, gimbalNative = 0; // degrees: joint pan, display tilt (up +), native pitch
+    uint32_t gimbalMs = 0;
     uint32_t lastStatusMs = 0;
 };
 

@@ -73,12 +73,16 @@ Frame setEvByte(uint8_t raw);                 // 0x02/0x2E  (0x10 = 0.0, +/- thi
 Frame setWhiteBalance(uint8_t mode, int kelvin, int tint); // 0x02/0x2C
 Frame setColor(uint8_t raw);                  // 0x02/0x42
 Frame setFocusMode(uint8_t v);                // 0x02/0x24
-Frame gimbalTarget(float yawDeg, float pitchDeg, uint32_t durationMs); // 0x04/0x14
+// nativeDeg: the gimbal's own pitch for pitchDeg (from its live attitude); NAN = the 180 - tilt estimate
+Frame gimbalTarget(float yawDeg, float pitchDeg, uint32_t durationMs, float nativeDeg = NAN); // 0x04/0x14
 Frame setVideoFormat(uint8_t resByte, uint8_t fpsIdx, uint8_t t0, uint8_t t1, uint8_t t2); // 0x02/0x18
 Frame param8E(uint8_t pidLo, uint8_t pidHi, uint8_t value); // 0x02/0x8E SET (audio/vocal)
 Frame gimbalModeSet(uint8_t a, uint8_t b); // 0x04/0x4C
 Frame setTimer(const uint8_t payload6[6]);  // 0x02/0x4A countdown
 Frame gimbalTimedStop();                    // 0x04/0x14 cancel move
+// 0x04/0x01 joystick (OpenCine gimbalStickPayload): axis0 tilt (up +), axis1 pan
+// (right +), 1024 = rest, 474..1574. Streamed every 40 ms while held.
+Frame gimbalStick(int axis0, int axis1);
 Frame gimbalRecenterCmd();                  // 0x04/0x4C FE 08 official recenter/reset
 
 } // namespace Duml

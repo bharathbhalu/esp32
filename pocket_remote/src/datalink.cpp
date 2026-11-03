@@ -317,6 +317,15 @@ static void applySubscribe(const std::vector<uint8_t> &p, CameraState &st) {
 
 void Datalink::apply(const Duml::Frame &f) {
     if (f.cmdSet == 0x00 && f.cmdId == 0x99) applySubscribe(f.payload, state_);
+    // Attitude: native pitch @0, yaw @4, display tilt @20 (negated: look-up +). Only
+    // the 50-byte layout; another length is a different frame (OpenCine AttitudeLayout)
+    if (f.cmdSet == 0x04 && f.cmdId == 0x05 && f.payload.size() == 50) {
+        const uint8_t *p = f.payload.data();
+        state_.gimbalNative = (int16_t)u16(p) / 10.0f;
+        state_.gimbalYaw = (int16_t)u16(p + 4) / 10.0f;
+        state_.gimbalTilt = -(int16_t)u16(p + 20) / 10.0f;
+        state_.gimbalMs = millis();
+    }
     const std::vector<uint8_t> &p = f.payload;
     if (f.cmdSet == 0x02 && f.cmdId == 0x80 && p.size() >= 13) {
         uint32_t flags = u32(p.data());

@@ -30,6 +30,7 @@ int stopRecording(); // saves to the first free slot; returns it, or -1 if too s
 
 // Playback
 void playPreset(Camera &cam, int preset, uint32_t durationMs, bool withVideo);
+void setFaceFront(bool on); // recenter before a preset and pan around that front
 void playSlot(Camera &cam, int slot, bool withVideo);
 bool playing();
 String status(); // e.g. "Pan L>R  2.4 / 6.0 s"

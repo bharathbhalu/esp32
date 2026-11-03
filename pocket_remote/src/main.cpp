@@ -91,6 +91,7 @@ static bool tiltToggle = false; // false: tilt while holding the button; true: t
 static int sensitivity = 1;     // index into SENSITIVITIES
 static int moveSeconds = 1;     // index into MOVE_SECONDS
 static bool videoWithMove = false;
+static bool faceFrontFirst = false;
 
 static const int MOVE_SECONDS[] = {3, 6, 10, 20};
 static const int MOVE_SECONDS_COUNT = 4;
@@ -178,7 +179,8 @@ static Rect movePreset(int i) { return {10 + (i % 4) * 88, 72 + (i / 4) * 46, 84
 static Rect moveSecondsRect(int i) { return {110 + i * 62, 166, 56, 32}; }
 static Rect moveSlot(int i) { return {14 + i * 86, 206, 82, 44}; }
 static const Rect MOVE_RECORD = {14, 258, 340, 44};
-static const Rect MOVE_VIDEO = {14, 308, 340, 34};
+static const Rect MOVE_VIDEO = {14, 308, 166, 34};
+static const Rect MOVE_FRONT = {188, 308, 166, 34};
 static const Rect MOVE_STATUS = {14, 348, 340, 34};
 static Rect gimbalSens(int i) { return {150 + i * 70, 258, 66, 32}; }
 static const Rect GIMBAL_RECENTER = {14, 300, 110, 36};
@@ -280,6 +282,8 @@ static void loadPrefs() {
     sensitivity = constrain((int)prefs.getUChar("sens", 1), 0, SENS_COUNT - 1);
     moveSeconds = constrain((int)prefs.getUChar("movesecs", 1), 0, MOVE_SECONDS_COUNT - 1);
     videoWithMove = prefs.getBool("movevideo", false);
+    faceFrontFirst = prefs.getBool("movefront", false);
+    Moves::setFaceFront(faceFrontFirst);
     sleepChoice = constrain((int)prefs.getUChar("sleep", 0), 0, SLEEP_COUNT - 1);
     soundOn = prefs.getBool("sound", true);
     selfTimer = constrain((int)prefs.getUChar("timer", 0), 0, TIMER_COUNT - 1);
@@ -297,6 +301,7 @@ static void savePrefs() {
     prefs.putUChar("sens", sensitivity);
     prefs.putUChar("movesecs", moveSeconds);
     prefs.putBool("movevideo", videoWithMove);
+    prefs.putBool("movefront", faceFrontFirst);
     prefs.putUChar("sleep", sleepChoice);
     prefs.putBool("sound", soundOn);
     prefs.putUChar("timer", selfTimer);
@@ -755,8 +760,10 @@ static void drawMoves() {
                Moves::playing() ? GRAY : WHITE);
     }
 
-    button(MOVE_VIDEO, videoWithMove ? "Record video with move: ON" : "Record video with move: OFF",
-           videoWithMove ? ACCENT : PANEL, videoWithMove ? BLACK : LIGHT_GRAY);
+    button(MOVE_VIDEO, videoWithMove ? "Video: ON" : "Video: OFF", videoWithMove ? ACCENT : PANEL,
+           videoWithMove ? BLACK : LIGHT_GRAY);
+    button(MOVE_FRONT, faceFrontFirst ? "Face front: ON" : "Face front: OFF", faceFrontFirst ? ACCENT : PANEL,
+           faceFrontFirst ? BLACK : LIGHT_GRAY);
 
     if (Moves::playing()) {
         String s = "STOP   " + Moves::status();
@@ -1325,6 +1332,11 @@ static void tapMoves(int x, int y) {
         if (moveSlot(i).contains(x, y) && Moves::slotUsed(i)) slotMenu = i;
     if (MOVE_VIDEO.contains(x, y)) {
         videoWithMove = !videoWithMove;
+        savePrefs();
+    }
+    if (MOVE_FRONT.contains(x, y)) {
+        faceFrontFirst = !faceFrontFirst;
+        Moves::setFaceFront(faceFrontFirst);
         savePrefs();
     }
 }
