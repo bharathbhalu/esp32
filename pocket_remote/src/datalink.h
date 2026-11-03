@@ -18,6 +18,14 @@ struct CameraState {
     uint32_t recordSeconds = 0;
     int storageTotalMb = -1, storageFreeMb = -1;
     int shootingMode = -1; // raw byte from 02/80
+    // Current settings from the camera's subscription pushes (-1 = not reported yet)
+    int expoMode = -1;     // 0x01 auto, 0x04 manual
+    int isoRaw = -1;       // ISO index byte (0 in auto)
+    int shutterDenom = -1; // configured 1/x in manual
+    int evByte = -1;       // 0x10 = 0 EV, 1/3 stop steps
+    int wbMode = -1;       // 0x00 auto, 0x06 custom
+    int wbKelvin = -1;
+    int colorRaw = -1;     // color profile byte
     uint32_t lastStatusMs = 0;
 };
 

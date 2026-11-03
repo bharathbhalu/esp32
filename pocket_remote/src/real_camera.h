@@ -63,6 +63,8 @@ private:
 
     int values_[S_COUNT] = {};
     std::vector<SettingId> queue_; // settings waiting to be sent
+    uint32_t changedAt_[S_COUNT] = {}; // when the board itself last changed each setting
+    void syncFromCamera();
 
     float yaw_ = 0, pitch_ = 0;
     uint32_t lastGimbal_ = 0;

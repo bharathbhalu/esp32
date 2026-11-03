@@ -75,8 +75,8 @@ static const char *const DESIGN_NAMES[D_COUNT] = {"Classic", "Tiles", "Dial", "H
 static Tab tab = TAB_HOME;
 static int pickerSetting = -1; // setting whose option picker is open (HOME or SET)
 static int profileMenu = -1;   // profile whose action popup is open
-static bool sheetOpen = false; // swipe-down profiles sheet
-static bool relaySheetOpen = false; // swipe-up FrameTap relay sheet
+static bool sheetOpen = false; // swipe-up profiles sheet
+static bool relaySheetOpen = false; // swipe-down FrameTap relay sheet
 static int dialIndex = 0;      // Dial design: which setting is shown
 static bool applying = false;  // a profile is being sent
 static bool needsRedraw = true;
@@ -86,7 +86,6 @@ static uint32_t toastUntil = 0;
 
 // Persisted preferences
 static Transport method = Transport::Bluetooth;
-static bool releaseAfterApply = true;
 static Design design = D_CLASSIC;
 static bool tiltToggle = false; // false: tilt while holding the button; true: tap on / tap off
 static int sensitivity = 1;     // index into SENSITIVITIES
@@ -161,12 +160,15 @@ static const Rect POPUP_APPLY = {50, 170, 128, 54};
 static const Rect POPUP_DELETE = {190, 170, 128, 54};
 static const Rect POPUP_CANCEL = {50, 240, 268, 50};
 
-static Rect sheetRow(int i) { return {14, 50 + i * 48, 340, 44}; }
+// Profiles sheet: rises from the bottom edge
 static int sheetHeight() { return max(130, 50 + Profiles::count() * 48 + 26); }
-// FrameTap relay sheet: rises from the bottom edge
-static const int RELAY_SHEET_H = 250;
-static const int RELAY_SHEET_Y = LCD_H - RELAY_SHEET_H;
+static int sheetTop() { return LCD_H - sheetHeight(); }
+static Rect sheetRow(int i) { return {14, sheetTop() + 50 + i * 48, 340, 44}; }
+// FrameTap relay sheet: pulls down from the top edge
+static const int RELAY_SHEET_H = 300;
+static const int RELAY_SHEET_Y = 0;
 static const Rect RELAY_TOGGLE = {LCD_W - 120, RELAY_SHEET_Y + 16, 104, 36};
+static const Rect RELAY_RESET = {16, RELAY_SHEET_Y + RELAY_SHEET_H - 62, LCD_W - 32, 40};
 
 static Rect gimbalModeButton(int i) { return {10 + i * 88, CONTENT_Y + 8, 84, 44}; }
 static const Rect GIMBAL_FIELD = {24, 100, 320, 122};
@@ -189,7 +191,6 @@ static const Rect SETUP_BACK = {8, 46, 96, 36};
 static Rect choice4(int y, int i) { return {14 + i * 86, y, 82, 40}; }
 static Rect choice3(int y, int i) { return {14 + i * 114, y, 108, 40}; }
 static Rect choice2(int y, int i) { return {14 + i * 174, y, 166, 44}; }
-static const Rect CONN_RELEASE = {14, 204, 340, 40};
 static const Rect CONN_SLEEP = {14, 252, 340, 40};
 static const Rect CONN_CONNECT = {14, 300, 340, 56};
 static const Rect HOME_WAKE = {34, 200, 145, 70};
@@ -274,7 +275,6 @@ static void loadPrefs() {
     Preferences prefs;
     prefs.begin("app", true);
     method = (Transport)prefs.getUChar("method", (uint8_t)Transport::Bluetooth);
-    releaseAfterApply = prefs.getBool("release", true);
     design = (Design)min((int)prefs.getUChar("design", D_CLASSIC), D_COUNT - 1);
     tiltToggle = prefs.getBool("tilttoggle", false);
     sensitivity = constrain((int)prefs.getUChar("sens", 1), 0, SENS_COUNT - 1);
@@ -292,7 +292,6 @@ static void savePrefs() {
     Preferences prefs;
     prefs.begin("app", false);
     prefs.putUChar("method", (uint8_t)method);
-    prefs.putBool("release", releaseAfterApply);
     prefs.putUChar("design", (uint8_t)design);
     prefs.putBool("tilttoggle", tiltToggle);
     prefs.putUChar("sens", sensitivity);
@@ -484,7 +483,7 @@ static void drawHeader() {
     textRight(right, 12, tName, 2, LIGHT_GRAY);
     right -= strlen(tName) * 12 + 14;
     gfx->fillCircle(right, 19, 6, dot);
-    // Grab handle hinting at the swipe-down profiles sheet
+    // Grab handle hinting at the swipe-down relay sheet
     gfx->fillRoundRect(LCD_W / 2 - 20, HEADER_H - 6, 40, 3, 1, GRAY);
 }
 
@@ -878,9 +877,6 @@ static void drawSetupConnection() {
     text(16, 170, ble ? "Commands over Bluetooth only." : "Uses the camera's Wi-Fi link (faster).", 1, LIGHT_GRAY);
     text(16, 184, ble ? "May work alongside FrameTap (untested)." : "FrameTap must be disconnected.", 1, LIGHT_GRAY);
 
-    choiceButton(CONN_RELEASE, releaseAfterApply ? "Release after profile: ON" : "Release after profile: OFF",
-                 releaseAfterApply);
-
     if (connected()) button(CONN_SLEEP, "Put camera to sleep", PANEL, SLEEP_PURPLE);
 
     if (const char *activity = cam.powerActivity()) {
@@ -1032,11 +1028,12 @@ static void drawTouchTest() {
 }
 
 static void drawSheet() {
-    int h = sheetHeight();
-    gfx->fillRect(0, 0, LCD_W, h, PANEL);
-    gfx->drawFastHLine(0, h - 1, LCD_W, GRAY);
-    text(16, 14, "Profiles", 2, WHITE);
-    textRight(LCD_W - 16, 18, applying ? "applying..." : "tap to apply", 1, applying ? AMBER : LIGHT_GRAY);
+    int y = sheetTop();
+    gfx->fillRect(0, y, LCD_W, sheetHeight(), PANEL);
+    gfx->drawFastHLine(0, y, LCD_W, GRAY);
+    gfx->fillRoundRect(LCD_W / 2 - 20, y + 6, 40, 3, 1, LIGHT_GRAY);
+    text(16, y + 14, "Profiles", 2, WHITE);
+    textRight(LCD_W - 16, y + 18, applying ? "applying..." : "tap to apply", 1, applying ? AMBER : LIGHT_GRAY);
     for (int i = 0; i < Profiles::count(); i++) {
         const Profile &p = Profiles::get(i);
         Rect r = sheetRow(i);
@@ -1044,14 +1041,15 @@ static void drawSheet() {
         text(r.x + 12, r.y + 6, p.name, 2, WHITE);
         text(r.x + 12, r.y + 28, Profiles::summary(p).c_str(), 1, LIGHT_GRAY);
     }
-    gfx->fillRoundRect(LCD_W / 2 - 20, h - 12, 40, 3, 1, LIGHT_GRAY);
 }
 
 static void drawRelaySheet() {
     int y = RELAY_SHEET_Y;
     gfx->fillRect(0, y, LCD_W, RELAY_SHEET_H, PANEL);
-    gfx->drawFastHLine(0, y, LCD_W, GRAY);
-    gfx->fillRoundRect(LCD_W / 2 - 20, y + 6, 40, 3, 1, LIGHT_GRAY);
+    gfx->drawFastHLine(0, y + RELAY_SHEET_H - 1, LCD_W, GRAY);
+    gfx->fillRoundRect(LCD_W / 2 - 20, y + RELAY_SHEET_H - 12, 40, 3, 1, LIGHT_GRAY);
+    gfx->fillRoundRect(RELAY_RESET.x, RELAY_RESET.y, RELAY_RESET.w, RELAY_RESET.h, 8, GRAY);
+    centered(RELAY_RESET, "Reset connection", 2, WHITE);
     text(16, y + 24, "FrameTap relay", 2, WHITE);
 
     Relay::Status st = Relay::status();
@@ -1071,7 +1069,7 @@ static void drawRelaySheet() {
     auto row = [&](const char *label, const String &value, uint16_t color) {
         text(16, ry, label, 1, GRAY);
         text(110, ry - 4, value.c_str(), 2, color);
-        ry += 30;
+        ry += 27; // six rows fit above the reset button
     };
     row("NAME", st.started ? st.name : String("-"), WHITE);
     row("STATUS", state, stateColor);
@@ -1082,7 +1080,7 @@ static void drawRelaySheet() {
         row("LOSS", String(st.videoMissing) + " pkt/s", st.videoMissing ? AMBER : OK_GREEN);
     } else {
         text(16, ry + 6, "In FrameTap, connect to the name above.", 1, LIGHT_GRAY);
-        text(16, ry + 22, "Swipe down to close.", 1, LIGHT_GRAY);
+        text(16, ry + 22, "Swipe up to close.", 1, LIGHT_GRAY);
     }
 }
 
@@ -1375,10 +1373,6 @@ static void tapSetupConnection(int x, int y) {
             connectCamera();
         }
     }
-    if (CONN_RELEASE.contains(x, y)) {
-        releaseAfterApply = !releaseAfterApply;
-        savePrefs();
-    }
     if (CONN_SLEEP.contains(x, y) && connected()) cam.sleep();
     if (CONN_CONNECT.contains(x, y) && !cam.powerActivity()) {
         if (cam.asleep()) cam.wake();
@@ -1525,8 +1519,8 @@ static bool updateSleep() {
 }
 
 static void tapSheet(int x, int y) {
-    if (y >= sheetHeight()) {
-        sheetOpen = false; // tap below the sheet closes it
+    if (y < sheetTop()) {
+        sheetOpen = false; // tap above the sheet closes it
         return;
     }
     if (applying) return;
@@ -1568,8 +1562,18 @@ static void onTap(int x, int y) {
         return;
     }
     if (relaySheetOpen) {
-        if (y < RELAY_SHEET_Y) relaySheetOpen = false; // tap above the sheet closes it
+        if (y >= RELAY_SHEET_Y + RELAY_SHEET_H) relaySheetOpen = false; // tap below the sheet closes it
         else if (RELAY_TOGGLE.contains(x, y)) Relay::setEnabled(!Relay::status().enabled);
+        else if (RELAY_RESET.contains(x, y)) {
+            // Drop FrameTap and the camera, then connect again from scratch
+            bool relayOn = Relay::status().enabled;
+            Relay::setEnabled(false);
+            if (cam.link() != Link::Disconnected) cam.disconnect();
+            Relay::setEnabled(relayOn);
+            connectCamera();
+            relaySheetOpen = false;
+            showToast("Reconnecting...");
+        }
         return;
     }
     for (int i = 0; i < TAB_COUNT; i++) {
@@ -1622,22 +1626,22 @@ static void onSwipe(int startX, int startY, int dx, int dy) {
         slotMenu = -1;
         return;
     }
-    if (!sheetOpen && vertical && dy > 0 && startY < HEADER_H + 20) {
-        sheetOpen = true; // pulled down from the header
+    if (sheetOpen) {
+        if (vertical && dy > 0) sheetOpen = false;
+        return;
+    }
+    if (relaySheetOpen) {
+        if (vertical && dy < 0) relaySheetOpen = false;
+        return;
+    }
+    if (vertical && dy < 0 && startY > LCD_H - TABBAR_H - 20) {
+        sheetOpen = true; // pushed up from the tab bar
         pickerSetting = -1;
         profileMenu = -1;
         return;
     }
-    if (sheetOpen) {
-        if (vertical && dy < 0) sheetOpen = false;
-        return;
-    }
-    if (relaySheetOpen) {
-        if (vertical && dy > 0) relaySheetOpen = false;
-        return;
-    }
-    if (vertical && dy < 0 && startY > LCD_H - TABBAR_H - 20) {
-        relaySheetOpen = true; // pushed up from the tab bar
+    if (vertical && dy > 0 && startY < HEADER_H + 20) {
+        relaySheetOpen = true; // pulled down from the header
         pickerSetting = -1;
         profileMenu = -1;
         slotMenu = -1;
@@ -1809,13 +1813,7 @@ void loop() {
             applying = false;
         } else if (cam.queued() == 0) {
             applying = false;
-            if (releaseAfterApply) {
-                cam.disconnect();
-                userDisconnected = true;
-                showToast("Applied - camera released");
-            } else {
-                showToast("Profile applied");
-            }
+            showToast("Profile applied");
         }
     }
 

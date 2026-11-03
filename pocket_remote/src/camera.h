@@ -85,6 +85,6 @@ public:
 
     bool isPhotoMode() const {
         const char *m = label(S_MODE);
-        return strcmp(m, "Photo") == 0 || strcmp(m, "Live Photo") == 0;
+        return strcmp(m, "Photo") == 0 || strcmp(m, "Live Photo") == 0 || strcmp(m, "Panorama") == 0;
     }
 };

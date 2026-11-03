@@ -278,7 +278,45 @@ void Datalink::observe(const uint8_t *data, size_t len) {
 }
 
 // Status decoding from OpenCine's CameraStatus+DJIWire.swift
+// 0x00/0x99 subscription push: [02 06 ..][nameLen u16 @13][name][6 bytes][valueLen u16][value]
+// (layout from OpenCine's StatusExtras.parseSubscribe)
+static bool parseSubscribe(const std::vector<uint8_t> &p, String &name, const uint8_t *&value, size_t &valueLen) {
+    if (p.size() < 24 || p[0] != 0x02 || p[1] != 0x06) return false;
+    size_t nameLen = u16(&p[13]);
+    if (nameLen == 0 || nameLen >= 80 || 15 + nameLen + 8 > p.size()) return false;
+    name = String((const char *)&p[15], nameLen);
+    size_t lenAt = 15 + nameLen + 6;
+    valueLen = u16(&p[lenAt]);
+    if (lenAt + 2 + valueLen > p.size()) return false;
+    value = &p[lenAt + 2];
+    return true;
+}
+
+// Decoding from OpenCine's StatusExtras.applyExpo / applyImageEffect
+static void applySubscribe(const std::vector<uint8_t> &p, CameraState &st) {
+    String name;
+    const uint8_t *v;
+    size_t n;
+    if (!parseSubscribe(p, name, v, n)) return;
+    if (name == "cam_expo_param" && n >= 8) {
+        if (v[7] == 0x01 || v[7] == 0x04) st.expoMode = v[7];
+        st.isoRaw = v[5];
+        if (v[6] >= 0x07 && v[6] <= 0x19) st.evByte = v[6];
+        uint16_t shutter = u16(v + 2); // the configured value; Auto applies its own
+        if (v[7] != 0x01 && (shutter & 0x8000) && (shutter & 0x7FFF) >= 1 && (shutter & 0x7FFF) <= 16000)
+            st.shutterDenom = shutter & 0x7FFF;
+    } else if (name == "cam_image_effect" && n >= 5) {
+        st.colorRaw = v[2];
+        if (n >= 9 && (v[4] == 0x00 || v[4] == 0x06)) {
+            st.wbMode = v[4];
+            int kelvin = u16(v + 5) * 100;
+            if (v[4] == 0x06 && kelvin >= 2000 && kelvin <= 10000) st.wbKelvin = kelvin;
+        }
+    }
+}
+
 void Datalink::apply(const Duml::Frame &f) {
+    if (f.cmdSet == 0x00 && f.cmdId == 0x99) applySubscribe(f.payload, state_);
     const std::vector<uint8_t> &p = f.payload;
     if (f.cmdSet == 0x02 && f.cmdId == 0x80 && p.size() >= 13) {
         uint32_t flags = u32(p.data());

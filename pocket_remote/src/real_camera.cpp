@@ -6,7 +6,7 @@
 
 // Option lists mirror SimCamera / the UI (Pocket 4 Pro). The real camera reports
 // valid combinations too, but fixed lists keep the UI identical for this cut.
-static const char *const MODES[] = {"Video", "Slow Motion", "Photo", "Live Photo"};
+static const char *const MODES[] = {"Video", "Slow Motion", "Photo", "Live Photo", "Timelapse", "Hyperlapse", "Night", "Panorama"};
 static const char *const EXPOSURES[] = {"Auto", "Manual"};
 static const char *const VIDEO_FORMATS[] = {"4K 24", "4K 25", "4K 30", "4K 48", "4K 50", "4K 60",
                                             "1080p 24", "1080p 25", "1080p 30", "1080p 48", "1080p 50", "1080p 60"};
@@ -15,7 +15,7 @@ static const char *const ISOS[] = {"100", "200", "400", "800", "1600", "3200", "
 static const char *const SHUTTERS[] = {"1/50", "1/60", "1/100", "1/120", "1/250", "1/500", "1/1000", "1/2000"};
 static const char *const EVS[] = {"-2.0", "-1.5", "-1.0", "-0.5", "0", "+0.5", "+1.0", "+1.5", "+2.0"};
 static const char *const WBS[] = {"Auto", "2700K", "3200K", "4000K", "5000K", "5600K", "6500K", "8000K"};
-static const char *const COLORS[] = {"Normal", "D-Log", "D-Log2"};
+static const char *const COLORS[] = {"Normal", "HDR", "D-Log", "D-Log2"};
 static const char *const FOCUSES[] = {"AF-C", "AF-S", "MF"};
 static const char *const AUDIOS[] = {"Stereo", "Mono"};
 static const char *const ON_OFF[] = {"Off", "On"};
@@ -25,11 +25,14 @@ static const char *const GIMBAL_MODES[] = {"Follow", "Tilt Lock", "FPV", "Dir Lo
 #define OPTS(a) Options{a, (int)(sizeof(a) / sizeof(a[0]))}
 
 // Value encodings (from OpenCine CameraControl enums)
-static const uint8_t MODE_RAW[] = {0x01, 0x00, 0x17, 0x4D};   // Video, SlowMo, Photo, LivePhoto
+// Shooting-mode codes from OpenCine's CameraCommands. Only codes this camera has
+// reported itself (a Nano froze on an unlisted one): Live Photo 0x4D and
+// Panorama 0x0C both seen from this Pocket 4 Pro
+static const uint8_t MODE_RAW[] = {0x01, 0x00, 0x17, 0x4D, 0x02, 0x0A, 0x28, 0x0C};
 static const uint8_t ISO_RAW[] = {0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09};
 static const int SHUTTER_DENOM[] = {50, 60, 100, 120, 250, 500, 1000, 2000};
 static const int WB_KELVIN[] = {0, 2700, 3200, 4000, 5000, 5600, 6500, 8000};
-static const uint8_t COLOR_RAW[] = {0x3F, 0x17, 0x41};        // Normal, D-Log, D-Log2
+static const uint8_t COLOR_RAW[] = {0x3F, 0x3C, 0x17, 0x41};  // Normal, HDR, D-Log, D-Log2 (OpenPocketCine, Pocket 4 Pro)
 
 static const char *AP_SSID = "PocketRemote";
 static const char *AP_PASS = "osmo12345678";
@@ -248,7 +251,7 @@ RealCamera::Options RealCamera::options(SettingId s) const {
 }
 
 bool RealCamera::available(SettingId s) const {
-    bool video = values_[S_MODE] <= 1, manual = values_[S_EXPOSURE] == 1;
+    bool video = !isPhotoMode(), manual = values_[S_EXPOSURE] == 1;
     switch (s) {
     case S_FORMAT:
     case S_COLOR:
@@ -275,7 +278,9 @@ const char *RealCamera::optionLabel(SettingId s, int i) const {
 void RealCamera::sendSetting(SettingId s, int index) {
     Serial.printf("send %s = %s\n", SETTINGS[s].name, optionLabel(s, index));
     switch (s) {
-    case S_MODE:     datalink_.send(Duml::setMode(MODE_RAW[index])); break;
+    case S_MODE:
+        datalink_.send(Duml::setMode(MODE_RAW[index]));
+        break;
     case S_EXPOSURE: datalink_.send(Duml::setExpoMode(index == 1 ? 0x04 : 0x01)); break;
     case S_ISO:      datalink_.send(Duml::setIsoIndex(ISO_RAW[index])); break;
     case S_SHUTTER:  datalink_.send(Duml::setShutterDenom(SHUTTER_DENOM[index])); break;
@@ -327,9 +332,53 @@ void RealCamera::sendSetting(SettingId s, int index) {
     }
 }
 
+// Show what the camera is actually set to (changed from FrameTap, the camera's
+// screen or the board). A setting the board just changed or still has queued is
+// left alone until the camera has caught up.
+void RealCamera::syncFromCamera() {
+    const CameraState &st = datalink_.state();
+    auto adopt = [&](SettingId s, int index) {
+        if (index < 0 || index >= optionCount(s) || index == values_[s] || pending(s)) return;
+        if (millis() - changedAt_[s] < 1500) return;
+        values_[s] = index;
+        Serial.printf("camera: %s = %s\n", SETTINGS[s].name, optionLabel(s, index));
+    };
+    auto find = [](const uint8_t *table, int count, int raw) {
+        for (int i = 0; i < count; i++)
+            if (table[i] == raw) return i;
+        return -1;
+    };
+    auto nearest = [](const int *table, int count, int v, int from) {
+        int best = -1;
+        for (int i = from; i < count; i++)
+            if (best < 0 || abs(table[i] - v) < abs(table[best] - v)) best = i;
+        return best;
+    };
+    if (st.shootingMode >= 0) {
+        int mode = st.shootingMode == 0x05 ? 2 : find(MODE_RAW, sizeof(MODE_RAW), st.shootingMode); // 0x05: Photo on other models
+        static int lastLogged = -1;
+        if (st.shootingMode != lastLogged) {
+            lastLogged = st.shootingMode;
+            Serial.printf("camera: shooting mode 0x%02X (%s)\n", st.shootingMode,
+                          mode >= 0 ? MODES[mode] : "unknown");
+        }
+        adopt(S_MODE, mode);
+    }
+    if (st.expoMode >= 0) adopt(S_EXPOSURE, st.expoMode == 0x04 ? 1 : 0);
+    if (st.expoMode == 0x04) {
+        adopt(S_ISO, find(ISO_RAW, sizeof(ISO_RAW), st.isoRaw));
+        if (st.shutterDenom > 0) adopt(S_SHUTTER, nearest(SHUTTER_DENOM, 8, st.shutterDenom, 0));
+    }
+    if (st.evByte >= 0) adopt(S_EV, lroundf((st.evByte - 0x10) / 3.0f * 2) + 4); // EVS: -2.0..+2.0 by 0.5
+    if (st.wbMode == 0x00) adopt(S_WB, 0);
+    else if (st.wbMode == 0x06 && st.wbKelvin > 0) adopt(S_WB, nearest(WB_KELVIN, 8, st.wbKelvin, 1));
+    if (st.colorRaw >= 0) adopt(S_COLOR, find(COLOR_RAW, sizeof(COLOR_RAW), st.colorRaw));
+}
+
 void RealCamera::set(SettingId s, int index) {
     if (index < 0 || index >= optionCount(s)) return;
     values_[s] = index;
+    changedAt_[s] = millis();
     if (s == S_MODE && values_[S_FORMAT] >= optionCount(S_FORMAT)) values_[S_FORMAT] = 0;
     queue_.push_back(s);
 }
@@ -408,6 +457,21 @@ void RealCamera::gimbalRecenter() {
 void RealCamera::sleep() { message("Sleep not supported on this link"); }
 
 void RealCamera::update() {
+    // Camera gone (switched off, overheated, out of range): its BLE drops or it
+    // leaves the AP. Go back to Disconnected so the 10 s auto-connect retries.
+    if (link_ == Link::Connected) {
+        static uint32_t lostSince = 0;
+        bool lost = (bleClient && !bleClient->isConnected()) || WiFi.softAPgetStationNum() == 0;
+        if (!lost) lostSince = 0;
+        else if (!lostSince) lostSince = millis();
+        else if (millis() - lostSince > 5000) {
+            lostSince = 0;
+            handedOff = false;
+            disconnect();
+            message("Camera lost - reconnecting");
+            return;
+        }
+    }
     if (link_ == Link::Connected) {
         if (!relayOwnsBle) blePump(); // keep BLE serviced (approval acks, drain)
         Relay::update();
@@ -433,6 +497,7 @@ void RealCamera::update() {
                 Serial.printf("own session: %s\n", alive ? "ALIVE" : "SILENT (camera stopped talking to the board)");
             }
         }
+        syncFromCamera();
         // Send one queued setting at a time, paced so each lands before the next
         static uint32_t lastSend = 0;
         if (!queue_.empty() && millis() - lastSend > 300) {

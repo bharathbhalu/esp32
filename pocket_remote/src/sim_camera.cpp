@@ -3,7 +3,7 @@
 
 // Option lists mirror the Pocket 4 Pro as described in the OpenPocketCine
 // handbook. A real camera reports Format pairs itself (camcap_video_format).
-static const char *const MODES[] = {"Video", "Slow Motion", "Photo", "Live Photo"};
+static const char *const MODES[] = {"Video", "Slow Motion", "Photo", "Live Photo", "Timelapse", "Hyperlapse", "Night", "Panorama"};
 static const char *const EXPOSURES[] = {"Auto", "Manual"};
 static const char *const VIDEO_FORMATS[] = {
     "4K 24", "4K 25", "4K 30", "4K 48", "4K 50", "4K 60",
