@@ -438,10 +438,13 @@ static void confirmInjections(uint16_t camAck) {
         if (pendingUsed[i] && (int16_t)(camAck - pending[i].seq) >= 0) pendingUsed[i] = false;
 }
 
+// Gentle: with many outstanding (a stick stream), resending every one every
+// 200 ms flooded the session and stalled it. Wait longer, a few per pass.
 static void resendInjections(const sockaddr_in &cam) {
-    for (int i = 0; i < PENDING_SLOTS; i++) {
+    int sent = 0;
+    for (int i = 0; i < PENDING_SLOTS && sent < 4; i++) {
         Pending &p = pending[i];
-        if (!pendingUsed[i] || millis() - p.sentAt < 200) continue;
+        if (!pendingUsed[i] || millis() - p.sentAt < 600) continue;
         if (++p.tries > 20) {
             pendingUsed[i] = false;
             Serial.printf("relay: board command %04X never confirmed\n", p.seq);
@@ -450,6 +453,7 @@ static void resendInjections(const sockaddr_in &cam) {
         sendto(sock, p.pkt, p.len, 0, (const sockaddr *)&cam, sizeof(cam));
         p.sentAt = millis();
         injResent++;
+        sent++;
     }
 }
 

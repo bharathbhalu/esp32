@@ -171,7 +171,12 @@ static const int RELAY_SHEET_Y = 0;
 static const Rect RELAY_TOGGLE = {LCD_W - 120, RELAY_SHEET_Y + 16, 104, 36};
 static const Rect RELAY_RESET = {16, RELAY_SHEET_Y + RELAY_SHEET_H - 62, LCD_W - 32, 40};
 
-static Rect gimbalModeButton(int i) { return {10 + i * 88, CONTENT_Y + 8, 84, 44}; }
+static Rect gimbalModeButton(int i) { return {10 + i * 88, 52, 84, 40}; }
+// GIMB (one page): mode, presets, time, then Center / Flip / Video / Front
+static Rect gimbalPreset(int i) { return {10 + (i % 4) * 88, 102 + (i / 4) * 46, 84, 40}; }
+static Rect gimbalSecondsRect(int i) { return {110 + i * 62, 198, 56, 32}; }
+static Rect gimbalAction(int i) { return {10 + i * 88, 242, 84, 40}; } // Center, Flip, Video, Front
+static const Rect GIMBAL_STATUS = {14, 294, 340, 36};
 static const Rect GIMBAL_FIELD = {24, 100, 320, 122};
 
 // GIMB moves page
@@ -183,7 +188,8 @@ static const Rect MOVE_VIDEO = {14, 308, 166, 34};
 static const Rect MOVE_FRONT = {188, 308, 166, 34};
 static const Rect MOVE_STATUS = {14, 348, 340, 34};
 static Rect gimbalSens(int i) { return {150 + i * 70, 258, 66, 32}; }
-static const Rect GIMBAL_RECENTER = {14, 300, 110, 36};
+static const Rect GIMBAL_RECENTER = {14, 300, 53, 36};
+static const Rect GIMBAL_FLIP = {71, 300, 53, 36};
 static const Rect GIMBAL_TILT_MODE = {14, 340, 110, 36};
 static const Rect GIMBAL_HOLD = {134, 300, 220, 76};
 
@@ -220,6 +226,7 @@ static Rect sideTimer(int i) { return {16 + i * 43, 384, 39, 28}; }
 // Tiles design: 3 columns of setting tiles, then a REC pill
 static Rect tileRect(int i) { return {8 + (i % 3) * 120, CONTENT_Y + 6 + (i / 3) * 66, 112, 60}; }
 static const Rect TILES_REC = {104, 318, 160, 62};
+static const Rect TILES_FLIP = {272, 318, 88, 62}; // gimbal front <-> back
 
 // Dial design
 static const Rect DIAL_REC = {144, 290, 80, 80};
@@ -583,10 +590,12 @@ static void drawHomeTiles() {
     for (int i = 0; i < n; i++) {
         Rect r = tileRect(i);
         gfx->fillRoundRect(r.x, r.y, r.w, r.h, 10, PANEL);
-        centered({r.x, r.y + 4, r.w, 16}, SETTINGS[list[i]].name, 1, LIGHT_GRAY);
+        centered({r.x, r.y + 3, r.w, 18}, SETTINGS[list[i]].name, 2, LIGHT_GRAY);
         String v = cam.pending(list[i]) ? "..." : cam.label(list[i]);
-        centered({r.x, r.y + 20, r.w, r.h - 22}, v.c_str(), 3, cam.pending(list[i]) ? AMBER : WHITE);
+        centered({r.x, r.y + 22, r.w, r.h - 24}, v.c_str(), 3, cam.pending(list[i]) ? AMBER : WHITE);
     }
+    gfx->fillRoundRect(TILES_FLIP.x, TILES_FLIP.y, TILES_FLIP.w, TILES_FLIP.h, 10, PANEL);
+    centered(TILES_FLIP, "Flip", 2, WHITE);
     // REC pill
     const Rect &p = TILES_REC;
     uint16_t bg = cam.isPhotoMode() ? LIGHT_GRAY : cam.recording() ? REC_RED : PANEL;
@@ -727,111 +736,43 @@ static void drawProfiles() {
     }
 }
 
-static void drawMoves() {
-    text(16, 48, "Moves", 2, WHITE);
-    textRight(LCD_W - 16, 52, "swipe right: back", 1, GRAY);
-
-    bool busy = Moves::playing() || Moves::recording();
-    for (int i = 0; i < Moves::PRESET_COUNT; i++)
-        button(movePreset(i), Moves::presetName(i), busy ? PANEL : GRAY, busy ? GRAY : WHITE);
-
-    text(16, 174, "Time", 2, LIGHT_GRAY);
-    for (int i = 0; i < MOVE_SECONDS_COUNT; i++) {
-        char label[8];
-        snprintf(label, sizeof(label), "%ds", MOVE_SECONDS[i]);
-        button(moveSecondsRect(i), label, i == moveSeconds ? ACCENT : GRAY, i == moveSeconds ? BLACK : WHITE);
-    }
-
-    for (int i = 0; i < Moves::SLOT_COUNT; i++) {
-        Rect r = moveSlot(i);
-        char label[16];
-        if (Moves::slotUsed(i)) snprintf(label, sizeof(label), "%d: %.0fs", i + 1, Moves::slotSeconds(i));
-        else snprintf(label, sizeof(label), "%d: --", i + 1);
-        bool used = Moves::slotUsed(i);
-        button(r, label, used ? ACCENT : PANEL, used ? BLACK : GRAY);
-    }
-
-    if (Moves::recording()) {
-        char label[32];
-        snprintf(label, sizeof(label), "STOP  %.1f s", Moves::recordedSeconds());
-        button(MOVE_RECORD, label, REC_RED, WHITE);
-    } else {
-        button(MOVE_RECORD, "Record a move (tilt)", Moves::playing() ? PANEL : GRAY,
-               Moves::playing() ? GRAY : WHITE);
-    }
-
-    button(MOVE_VIDEO, videoWithMove ? "Video: ON" : "Video: OFF", videoWithMove ? ACCENT : PANEL,
-           videoWithMove ? BLACK : LIGHT_GRAY);
-    button(MOVE_FRONT, faceFrontFirst ? "Face front: ON" : "Face front: OFF", faceFrontFirst ? ACCENT : PANEL,
-           faceFrontFirst ? BLACK : LIGHT_GRAY);
-
-    if (Moves::playing()) {
-        String s = "STOP   " + Moves::status();
-        button(MOVE_STATUS, s.c_str(), AMBER, BLACK);
-    } else if (Moves::recording()) {
-        centered(MOVE_STATUS, "Tilt the board to steer", 2, OK_GREEN);
-    } else {
-        char pos[40];
-        snprintf(pos, sizeof(pos), "Pan %+.0f  Tilt %+.0f", cam.gimbalYaw(), cam.gimbalPitch());
-        centered(MOVE_STATUS, pos, 2, LIGHT_GRAY);
-    }
-
-    if (slotMenu >= 0) {
-        char title[24];
-        snprintf(title, sizeof(title), "Move %d  (%.1f s)", slotMenu + 1, Moves::slotSeconds(slotMenu));
-        gfx->fillRoundRect(POPUP.x, POPUP.y, POPUP.w, POPUP.h, 14, PANEL);
-        gfx->drawRoundRect(POPUP.x, POPUP.y, POPUP.w, POPUP.h, 14, LIGHT_GRAY);
-        centered({POPUP.x, POPUP.y + 14, POPUP.w, 30}, title, 2, WHITE);
-        button(POPUP_APPLY, "Play", ACCENT, BLACK);
-        button(POPUP_DELETE, "Delete", REC_RED, WHITE);
-        button(POPUP_CANCEL, "Cancel", GRAY, WHITE);
-    }
-}
-
 static void drawGimbal() {
     if (!connected()) {
         drawNotConnected();
         return;
     }
-    if (gimbalPage == 1) {
-        drawMoves();
-        return;
-    }
-    textRight(LCD_W - 16, 93, "swipe left: Moves", 1, GRAY);
     for (int i = 0; i < cam.optionCount(S_GIMBAL_MODE); i++) {
         bool selected = i == cam.value(S_GIMBAL_MODE);
         const char *label = cam.pending(S_GIMBAL_MODE) && selected ? "..." : cam.optionLabel(S_GIMBAL_MODE, i);
         button(gimbalModeButton(i), label, selected ? ACCENT : GRAY, selected ? BLACK : WHITE);
     }
 
-    // Field to scale over the reachable range, so level/center is off-middle.
-    // Crosshair and dot share the same mapping.
-    const Rect &f = GIMBAL_FIELD;
-    auto yawX = [&](float yaw) {
-        return f.x + 12 + (int)((yaw - GIMBAL_YAW_MIN) / (GIMBAL_YAW_MAX - GIMBAL_YAW_MIN) * (f.w - 24));
-    };
-    auto pitchY = [&](float pitch) {
-        return f.y + 10 + (int)((GIMBAL_PITCH_MAX - pitch) / (GIMBAL_PITCH_MAX - GIMBAL_PITCH_MIN) * (f.h - 20));
-    };
-    gfx->drawRoundRect(f.x, f.y, f.w, f.h, 10, GRAY);
-    gfx->drawFastHLine(f.x + 6, pitchY(0), f.w - 12, GRAY);
-    gfx->drawFastVLine(yawX(0), f.y + 6, f.h - 12, GRAY);
-    gfx->fillCircle(yawX(cam.gimbalYaw()), pitchY(cam.gimbalPitch()), 9, holding ? OK_GREEN : ACCENT);
+    bool busy = Moves::playing();
+    for (int i = 0; i < Moves::PRESET_COUNT; i++)
+        button(gimbalPreset(i), Moves::presetName(i), busy ? PANEL : GRAY, busy ? GRAY : WHITE);
 
-    char angles[40];
-    snprintf(angles, sizeof(angles), "Pan %+4.0f   Tilt %+4.0f", cam.gimbalYaw(), cam.gimbalPitch());
-    centered({0, 226, LCD_W, 26}, angles, 2, WHITE);
+    text(16, 206, "Time", 2, LIGHT_GRAY);
+    for (int i = 0; i < MOVE_SECONDS_COUNT; i++) {
+        char label[8];
+        snprintf(label, sizeof(label), "%ds", MOVE_SECONDS[i]);
+        button(gimbalSecondsRect(i), label, i == moveSeconds ? ACCENT : GRAY, i == moveSeconds ? BLACK : WHITE);
+    }
 
-    text(14, 266, "Sensitivity", 2, LIGHT_GRAY);
-    for (int i = 0; i < SENS_COUNT; i++)
-        button(gimbalSens(i), SENSITIVITIES[i].name, i == sensitivity ? ACCENT : GRAY,
-               i == sensitivity ? BLACK : WHITE);
+    button(gimbalAction(0), "Center", GRAY, WHITE);
+    button(gimbalAction(1), "Flip", GRAY, WHITE);
+    button(gimbalAction(2), videoWithMove ? "Video ON" : "Video OFF", videoWithMove ? ACCENT : PANEL,
+           videoWithMove ? BLACK : LIGHT_GRAY);
+    button(gimbalAction(3), faceFrontFirst ? "Front ON" : "Front OFF", faceFrontFirst ? ACCENT : PANEL,
+           faceFrontFirst ? BLACK : LIGHT_GRAY);
 
-    button(GIMBAL_RECENTER, "Center", GRAY, WHITE);
-    button(GIMBAL_TILT_MODE, tiltToggle ? "Mode: Tap" : "Mode: Hold", PANEL, WHITE);
-    const char *label = tiltToggle ? (holding ? "TILTING - TAP OFF" : "TAP TO TILT")
-                                   : (holding ? "MOVING" : "HOLD + TILT");
-    button(GIMBAL_HOLD, label, holding ? OK_GREEN : ACCENT, BLACK);
+    if (Moves::playing()) {
+        String st = "STOP   " + Moves::status();
+        button(GIMBAL_STATUS, st.c_str(), AMBER, BLACK);
+    } else {
+        char pos[40];
+        snprintf(pos, sizeof(pos), "Pan %+.0f  Tilt %+.0f", cam.gimbalYaw(), cam.gimbalPitch());
+        centered(GIMBAL_STATUS, pos, 2, LIGHT_GRAY);
+    }
 }
 
 static void choiceButton(const Rect &r, const char *label, bool selected) {
@@ -1230,6 +1171,7 @@ static void tapHome(int x, int y) {
         for (int i = 0; i < n; i++)
             if (tileRect(i).contains(x, y)) pickerSetting = list[i];
         if (TILES_REC.contains(x, y)) pressShutter();
+        if (TILES_FLIP.contains(x, y)) cam.gimbalFlip();
         break;
     }
     case D_DIAL:
@@ -1287,88 +1229,33 @@ static void tapProfiles(int x, int y) {
     }
 }
 
-static void tapMoves(int x, int y) {
-    if (slotMenu >= 0) {
-        int i = slotMenu;
-        slotMenu = -1;
-        if (POPUP_APPLY.contains(x, y)) {
-            stopHold();
-            Moves::playSlot(cam, i, videoWithMove);
-        } else if (POPUP_DELETE.contains(x, y)) {
-            Moves::deleteSlot(i);
-            showToast("Move deleted");
-        }
-        return;
-    }
+static void tapGimbal(int x, int y) {
+    if (tapNotConnected(x, y)) return;
     if (Moves::playing()) {
-        if (MOVE_STATUS.contains(x, y)) Moves::stop(cam);
+        if (GIMBAL_STATUS.contains(x, y)) Moves::stop(cam);
         return;
     }
-    if (MOVE_RECORD.contains(x, y)) {
-        if (Moves::recording()) {
-            finishRecording();
-        } else if (!Moves::hasFreeSlot()) {
-            showToast("All 4 slots full - delete one");
-        } else {
-            startHold(); // steer by tilt until Stop, whatever the Hold/Tap mode
-            if (holding) Moves::startRecording();
-        }
-        return;
-    }
-    if (Moves::recording()) return;
-    for (int i = 0; i < Moves::PRESET_COUNT; i++) {
-        if (movePreset(i).contains(x, y)) {
-            stopHold();
-            Moves::playPreset(cam, i, MOVE_SECONDS[moveSeconds] * 1000, videoWithMove);
-        }
-    }
+    // Always sent: the camera may be in another mode than the board last set
+    for (int i = 0; i < cam.optionCount(S_GIMBAL_MODE); i++)
+        if (gimbalModeButton(i).contains(x, y)) cam.set(S_GIMBAL_MODE, i);
+    for (int i = 0; i < Moves::PRESET_COUNT; i++)
+        if (gimbalPreset(i).contains(x, y)) Moves::playPreset(cam, i, MOVE_SECONDS[moveSeconds] * 1000, videoWithMove);
     for (int i = 0; i < MOVE_SECONDS_COUNT; i++) {
-        if (moveSecondsRect(i).contains(x, y)) {
+        if (gimbalSecondsRect(i).contains(x, y)) {
             moveSeconds = i;
             savePrefs();
         }
     }
-    for (int i = 0; i < Moves::SLOT_COUNT; i++)
-        if (moveSlot(i).contains(x, y) && Moves::slotUsed(i)) slotMenu = i;
-    if (MOVE_VIDEO.contains(x, y)) {
+    if (gimbalAction(0).contains(x, y)) cam.gimbalRecenter();
+    if (gimbalAction(1).contains(x, y)) cam.gimbalFlip();
+    if (gimbalAction(2).contains(x, y)) {
         videoWithMove = !videoWithMove;
         savePrefs();
     }
-    if (MOVE_FRONT.contains(x, y)) {
+    if (gimbalAction(3).contains(x, y)) {
         faceFrontFirst = !faceFrontFirst;
         Moves::setFaceFront(faceFrontFirst);
         savePrefs();
-    }
-}
-
-static void tapGimbal(int x, int y) {
-    if (tapNotConnected(x, y)) return;
-    if (gimbalPage == 1) {
-        tapMoves(x, y);
-        return;
-    }
-    for (int i = 0; i < cam.optionCount(S_GIMBAL_MODE); i++)
-        if (gimbalModeButton(i).contains(x, y) && i != cam.value(S_GIMBAL_MODE)) cam.set(S_GIMBAL_MODE, i);
-    if (GIMBAL_RECENTER.contains(x, y)) {
-        stopHold(); // otherwise leftover tilt drives it straight off center again
-        Moves::stop(cam);
-        cam.gimbalRecenter();
-    }
-    for (int i = 0; i < SENS_COUNT; i++) {
-        if (gimbalSens(i).contains(x, y)) {
-            sensitivity = i;
-            savePrefs();
-        }
-    }
-    if (GIMBAL_TILT_MODE.contains(x, y)) {
-        stopHold();
-        tiltToggle = !tiltToggle;
-        savePrefs();
-    }
-    // Tap mode: the button switches tilt control on and off
-    if (tiltToggle && GIMBAL_HOLD.contains(x, y)) {
-        if (holding) stopHold();
-        else startHold();
     }
 }
 
@@ -1660,7 +1547,7 @@ static void onSwipe(int startX, int startY, int dx, int dy) {
         return;
     }
     // GIMB: swipe left for the Moves page, right to go back
-    if (tab == TAB_GIMBAL && !vertical && !Moves::recording()) {
+    if (false && tab == TAB_GIMBAL && !vertical) { // GIMB is one page now
         int page = dx < 0 ? 1 : 0;
         if (page != gimbalPage) {
             if (!tiltToggle) stopHold();
@@ -1674,7 +1561,7 @@ static void onSwipe(int startX, int startY, int dx, int dy) {
 
 // Returns true if the press was consumed immediately (hold-to-tilt)
 static bool onPressStart(int x, int y) {
-    if (!tiltToggle && !sheetOpen && !relaySheetOpen && tab == TAB_GIMBAL && gimbalPage == 0 && connected() &&
+    if (false && !tiltToggle && !sheetOpen && !relaySheetOpen && tab == TAB_GIMBAL && connected() && // no tilt steering
         GIMBAL_HOLD.contains(x, y)) {
         startHold();
         needsRedraw = true;

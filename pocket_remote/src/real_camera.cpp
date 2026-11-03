@@ -314,9 +314,12 @@ void RealCamera::sendSetting(SettingId s, int index) {
     case S_AUDIO:  datalink_.send(Duml::param8E(0x20, 0x00, index == 1 ? 0x01 : 0x02)); break; // Mono/Stereo
     case S_VOCAL:  datalink_.send(Duml::param8E(0x4C, 0x00, index == 1 ? 0x01 : 0x00)); break; // On/Off
     case S_GIMBAL_MODE: {
-        // Follow/Tilt Lock = 02 08, FPV = 01 08, Dir Lock = 00 08 (best effort)
+        // OpenPocketCine (confirmed on a Pocket 4P): 0x04/0x4C 02 08 is the Follow family,
+        // which 0x04/0x50 00 04 01 <tilt> then splits into Follow (0) / Tilt locked (1);
+        // FPV 01 08, Direction Lock 00 08
         static const uint8_t A[] = {0x02, 0x02, 0x01, 0x00};
         datalink_.send(Duml::gimbalModeSet(A[index], 0x08));
+        if (index <= 1) datalink_.send(Duml::gimbalTiltLock(index == 1));
         break;
     }
     case S_TIMER: {
@@ -335,6 +338,8 @@ void RealCamera::sendSetting(SettingId s, int index) {
 // Show what the camera is actually set to (changed from FrameTap, the camera's
 // screen or the board). A setting the board just changed or still has queued is
 // left alone until the camera has caught up.
+static bool attitudeFresh(const CameraState &st);
+
 void RealCamera::syncFromCamera() {
     const CameraState &st = datalink_.state();
     auto adopt = [&](SettingId s, int index) {
@@ -373,6 +378,13 @@ void RealCamera::syncFromCamera() {
     if (st.wbMode == 0x00) adopt(S_WB, 0);
     else if (st.wbMode == 0x06 && st.wbKelvin > 0) adopt(S_WB, nearest(WB_KELVIN, 8, st.wbKelvin, 1));
     if (st.colorRaw >= 0) adopt(S_COLOR, find(COLOR_RAW, sizeof(COLOR_RAW), st.colorRaw));
+    // Gimbal mode family from the attitude (OpenPocketCine). Follow vs Tilt locked
+    // isn't in it, so a Follow-family report keeps whichever of the two is shown
+    if (attitudeFresh(st)) {
+        if (st.gimbalFamily == 0) adopt(S_GIMBAL_MODE, 3);
+        else if (st.gimbalFamily == 1) adopt(S_GIMBAL_MODE, 2);
+        else if (st.gimbalFamily == 2 && values_[S_GIMBAL_MODE] >= 2) adopt(S_GIMBAL_MODE, 0);
+    }
 }
 
 void RealCamera::set(SettingId s, int index) {
@@ -477,6 +489,10 @@ void RealCamera::gimbalMoveTo(float yaw, float pitch, uint32_t durationMs) {
     pitch_ = constrain(pitch, GIMBAL_PITCH_MIN, GIMBAL_PITCH_MAX);
     if (link_ == Link::Connected)
         datalink_.send(Duml::gimbalTarget(yaw_, pitch_, durationMs, nativeFor(datalink_.state(), pitch_)));
+}
+
+void RealCamera::gimbalFlip() {
+    if (link_ == Link::Connected) datalink_.send(Duml::gimbalFlipCmd());
 }
 
 void RealCamera::gimbalRecenter() {

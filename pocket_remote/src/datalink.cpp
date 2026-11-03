@@ -324,6 +324,7 @@ void Datalink::apply(const Duml::Frame &f) {
         state_.gimbalNative = (int16_t)u16(p) / 10.0f;
         state_.gimbalYaw = (int16_t)u16(p + 4) / 10.0f;
         state_.gimbalTilt = -(int16_t)u16(p + 20) / 10.0f;
+        state_.gimbalFamily = p[6] >> 6;
         state_.gimbalMs = millis();
     }
     const std::vector<uint8_t> &p = f.payload;

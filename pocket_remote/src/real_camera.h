@@ -32,6 +32,7 @@ public:
     void gimbalSpeed(float yaw, float pitch) override;
     void gimbalMoveTo(float yaw, float pitch, uint32_t durationMs) override;
     void gimbalRecenter() override;
+    void gimbalFlip() override;
     float gimbalYaw() const override;   // live from the camera when fresh
     float gimbalPitch() const override;
 

@@ -29,6 +29,7 @@ struct CameraState {
     // Gimbal attitude from the 50-byte 0x04/0x05 push (OpenCine/OpenPocketCine layout)
     float gimbalYaw = 0, gimbalTilt = 0, gimbalNative = 0; // degrees: joint pan, display tilt (up +), native pitch
     uint32_t gimbalMs = 0;
+    int gimbalFamily = -1; // attitude byte 6 top bits: 0 Direction Lock, 1 FPV, 2 Follow family
     uint32_t lastStatusMs = 0;
 };
 

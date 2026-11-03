@@ -83,6 +83,8 @@ Frame gimbalTimedStop();                    // 0x04/0x14 cancel move
 // 0x04/0x01 joystick (OpenCine gimbalStickPayload): axis0 tilt (up +), axis1 pan
 // (right +), 1024 = rest, 474..1574. Streamed every 40 ms while held.
 Frame gimbalStick(int axis0, int axis1);
+Frame gimbalTiltLock(bool locked);         // 0x04/0x50 00 04 01 <0 Follow, 1 Tilt locked>
+Frame gimbalFlipCmd();                     // 0x04/0x4C FE 09 rotate front <-> back (selfie)
 Frame gimbalRecenterCmd();                  // 0x04/0x4C FE 08 official recenter/reset
 
 } // namespace Duml

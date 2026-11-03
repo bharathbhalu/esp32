@@ -65,6 +65,7 @@ public:
     // Timed move to an absolute angle (real camera: 04/14 target, 0.1 s resolution)
     virtual void gimbalMoveTo(float yaw, float pitch, uint32_t durationMs) = 0;
     virtual void gimbalRecenter() = 0;
+    virtual void gimbalFlip() {} // rotate the lens front <-> back
     virtual float gimbalYaw() const = 0;
     virtual float gimbalPitch() const = 0;
 
