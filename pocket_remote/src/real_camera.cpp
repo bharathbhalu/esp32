@@ -491,6 +491,13 @@ void RealCamera::gimbalMoveTo(float yaw, float pitch, uint32_t durationMs) {
         datalink_.send(Duml::gimbalTarget(yaw_, pitch_, durationMs, nativeFor(datalink_.state(), pitch_)));
 }
 
+// Level: tilt 0 at the current pan; the native pitch comes from the live pose
+void RealCamera::gimbalLevel() { gimbalMoveTo(gimbalYaw(), 0, 1000); }
+
+void RealCamera::gimbalFollowSpeed(int speed) {
+    if (link_ == Link::Connected) datalink_.send(Duml::gimbalFollowSpeed((uint8_t)constrain(speed, 0, 2)));
+}
+
 void RealCamera::gimbalFlip() {
     if (link_ == Link::Connected) datalink_.send(Duml::gimbalFlipCmd());
 }

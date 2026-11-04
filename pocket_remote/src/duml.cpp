@@ -199,6 +199,9 @@ Frame gimbalStick(int axis0, int axis1) {
 Frame gimbalTiltLock(bool locked) {
     return make((uint8_t)((0 << 5) | 0x04), 0, 0x04, 0x50, {0x00, 0x04, 0x01, (uint8_t)(locked ? 1 : 0)});
 }
+Frame gimbalFollowSpeed(uint8_t speed) {
+    return make((uint8_t)((0 << 5) | 0x04), 0, 0x04, 0x50, {0x00, 0x05, 0x01, speed});
+}
 Frame gimbalFlipCmd() { return make((uint8_t)((0 << 5) | 0x04), 0, 0x04, 0x4C, {0xFE, 0x09}); } // OpenCine gimbalFlip
 
 Frame gimbalRecenterCmd() { return make((uint8_t)((0 << 5) | 0x04), 0, 0x04, 0x4C, {0xFE, 0x08}); }

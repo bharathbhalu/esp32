@@ -117,7 +117,38 @@ int stopRecording() {
 
 // ---------- playback ----------
 
+// Ramp: instead of one constant-speed timed move per leg, each leg becomes a few
+// short ones whose positions follow an ease curve, so the gimbal starts and
+// stops gently. 0 Off, 1 Medium (smoothstep), 2 Soft (smootherstep).
+static int ramp = 0;
+static const int RAMP_STEPS = 6;
+
+void setRamp(int r) { ramp = constrain(r, 0, 2); }
+
+static float ease(float x) {
+    if (ramp == 1) return x * x * (3 - 2 * x);
+    return x * x * x * (x * (6 * x - 15) + 10);
+}
+
+static void applyRamp() {
+    if (ramp == 0 || pathLen < 2 || (pathLen - 1) * RAMP_STEPS + 1 > MAX_SAMPLES) return;
+    static Waypoint eased[MAX_SAMPLES];
+    int n = 0;
+    for (int leg = 0; leg < pathLen - 1; leg++) {
+        const Waypoint &a = path[leg], &b = path[leg + 1];
+        for (int k = 0; k < RAMP_STEPS; k++) {
+            float f = ease((float)k / RAMP_STEPS);
+            eased[n++] = {a.yaw + (b.yaw - a.yaw) * f, a.pitch + (b.pitch - a.pitch) * f,
+                          a.t + (b.t - a.t) * k / RAMP_STEPS};
+        }
+    }
+    eased[n++] = path[pathLen - 1];
+    memcpy(path, eased, n * sizeof(Waypoint));
+    pathLen = n;
+}
+
 static void start(Camera &cam, const char *name, bool withVideo) {
+    applyRamp();
     strlcpy(playName, name, sizeof(playName));
     wantVideo = withVideo;
     startedVideo = false;
@@ -133,6 +164,24 @@ static void start(Camera &cam, const char *name, bool withVideo) {
 }
 
 void setFaceFront(bool on) { faceFront = on; }
+
+// Timelapse pan: front - 45 to front + 45 over minutes. One camera move lasts at
+// most 25.5 s, so the sweep is a chain of 20 s legs; no ramp (it would be lost
+// in a timelapse anyway)
+void playTimelapsePan(Camera &cam, uint32_t totalMs, bool withVideo) {
+    const uint32_t LEG_MS = 20000;
+    int legs = constrain((int)((totalMs + LEG_MS - 1) / LEG_MS), 1, MAX_SAMPLES - 1);
+    float front = cam.gimbalYaw();
+    float from = constrain(front - 45, GIMBAL_YAW_MIN, GIMBAL_YAW_MAX);
+    float to = constrain(front + 45, GIMBAL_YAW_MIN, GIMBAL_YAW_MAX);
+    float tilt = cam.gimbalPitch();
+    pathLen = legs + 1;
+    for (int i = 0; i <= legs; i++) path[i] = {from + (to - from) * i / legs, tilt, totalMs * (uint32_t)i / legs};
+    int saved = ramp;
+    ramp = 0;
+    start(cam, "TL pan", withVideo);
+    ramp = saved;
+}
 
 // Preset waypoints are pan offsets from front (tilt stays absolute)
 static void runPreset(Camera &cam, int preset, uint32_t durationMs, bool withVideo, float front) {

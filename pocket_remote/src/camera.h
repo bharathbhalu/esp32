@@ -66,6 +66,8 @@ public:
     virtual void gimbalMoveTo(float yaw, float pitch, uint32_t durationMs) = 0;
     virtual void gimbalRecenter() = 0;
     virtual void gimbalFlip() {} // rotate the lens front <-> back
+    virtual void gimbalLevel() {}               // tilt back to the horizon at the current pan
+    virtual void gimbalFollowSpeed(int speed) {} // 0 Fast, 1 Default, 2 Slow
     virtual float gimbalYaw() const = 0;
     virtual float gimbalPitch() const = 0;
 

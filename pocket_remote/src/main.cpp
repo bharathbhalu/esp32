@@ -92,6 +92,8 @@ static int sensitivity = 1;     // index into SENSITIVITIES
 static int moveSeconds = 1;     // index into MOVE_SECONDS
 static bool videoWithMove = false;
 static bool faceFrontFirst = false;
+static int followSpeed = 1, rampMode = 0, tlIndex = 1;
+static bool tlArmed = false; // TL pan tapped: status line offers Start, more taps change minutes
 
 static const int MOVE_SECONDS[] = {3, 6, 10, 20};
 static const int MOVE_SECONDS_COUNT = 4;
@@ -177,6 +179,10 @@ static Rect gimbalPreset(int i) { return {10 + (i % 4) * 88, 102 + (i / 4) * 46,
 static Rect gimbalSecondsRect(int i) { return {110 + i * 62, 198, 56, 32}; }
 static Rect gimbalAction(int i) { return {10 + i * 88, 242, 84, 40}; } // Center, Flip, Video, Front
 static const Rect GIMBAL_STATUS = {14, 294, 340, 36};
+static Rect gimbalExtra(int i) { return {10 + i * 88, 338, 84, 40}; } // Level, Speed, Ramp, TL pan
+static const char *const FOLLOW_SPEEDS[] = {"Fast", "Norm", "Slow"}; // camera wire 0, 1, 2
+static const char *const RAMPS[] = {"Off", "Med", "Soft"};
+static const int TL_MINUTES[] = {2, 5, 10, 20};
 static const Rect GIMBAL_FIELD = {24, 100, 320, 122};
 
 // GIMB moves page
@@ -290,6 +296,10 @@ static void loadPrefs() {
     moveSeconds = constrain((int)prefs.getUChar("movesecs", 1), 0, MOVE_SECONDS_COUNT - 1);
     videoWithMove = prefs.getBool("movevideo", false);
     faceFrontFirst = prefs.getBool("movefront", false);
+    followSpeed = constrain(prefs.getInt("gspeed", 1), 0, 2);
+    rampMode = constrain(prefs.getInt("moveramp", 0), 0, 2);
+    tlIndex = constrain(prefs.getInt("tlmin", 1), 0, 3);
+    Moves::setRamp(rampMode);
     Moves::setFaceFront(faceFrontFirst);
     sleepChoice = constrain((int)prefs.getUChar("sleep", 0), 0, SLEEP_COUNT - 1);
     soundOn = prefs.getBool("sound", true);
@@ -309,6 +319,9 @@ static void savePrefs() {
     prefs.putUChar("movesecs", moveSeconds);
     prefs.putBool("movevideo", videoWithMove);
     prefs.putBool("movefront", faceFrontFirst);
+    prefs.putInt("gspeed", followSpeed);
+    prefs.putInt("moveramp", rampMode);
+    prefs.putInt("tlmin", tlIndex);
     prefs.putUChar("sleep", sleepChoice);
     prefs.putBool("sound", soundOn);
     prefs.putUChar("timer", selfTimer);
@@ -495,6 +508,12 @@ static void drawHeader() {
     textRight(right, 12, tName, 2, LIGHT_GRAY);
     right -= strlen(tName) * 12 + 14;
     gfx->fillCircle(right, 19, 6, dot);
+    // FrameTap relay: green sharing control, amber pairing, gray waiting
+    Relay::Status rs = Relay::status();
+    if (rs.started && rs.enabled) {
+        uint16_t c = rs.tapWifi ? OK_GREEN : rs.tapBle ? AMBER : GRAY;
+        textRight(right - 14, 12, "FT", 2, c);
+    }
     // Grab handle hinting at the swipe-down relay sheet
     gfx->fillRoundRect(LCD_W / 2 - 20, HEADER_H - 6, 40, 3, 1, GRAY);
 }
@@ -765,9 +784,22 @@ static void drawGimbal() {
     button(gimbalAction(3), faceFrontFirst ? "Front ON" : "Front OFF", faceFrontFirst ? ACCENT : PANEL,
            faceFrontFirst ? BLACK : LIGHT_GRAY);
 
+    char lbl[16];
+    button(gimbalExtra(0), "Level", GRAY, WHITE);
+    snprintf(lbl, sizeof(lbl), "Spd %s", FOLLOW_SPEEDS[followSpeed]);
+    button(gimbalExtra(1), lbl, PANEL, WHITE);
+    snprintf(lbl, sizeof(lbl), "Ramp %s", RAMPS[rampMode]);
+    button(gimbalExtra(2), lbl, rampMode ? ACCENT : PANEL, rampMode ? BLACK : WHITE);
+    snprintf(lbl, sizeof(lbl), "TL %dm", TL_MINUTES[tlIndex]);
+    button(gimbalExtra(3), lbl, tlArmed ? ACCENT : PANEL, tlArmed ? BLACK : WHITE);
+
     if (Moves::playing()) {
         String st = "STOP   " + Moves::status();
         button(GIMBAL_STATUS, st.c_str(), AMBER, BLACK);
+    } else if (tlArmed) {
+        char st[32];
+        snprintf(st, sizeof(st), "Start TL pan %d min", TL_MINUTES[tlIndex]);
+        button(GIMBAL_STATUS, st, OK_GREEN, BLACK);
     } else {
         char pos[40];
         snprintf(pos, sizeof(pos), "Pan %+.0f  Tilt %+.0f", cam.gimbalYaw(), cam.gimbalPitch());
@@ -1234,6 +1266,30 @@ static void tapGimbal(int x, int y) {
     if (Moves::playing()) {
         if (GIMBAL_STATUS.contains(x, y)) Moves::stop(cam);
         return;
+    }
+    // TL pan: first tap arms it, more taps change the minutes, the status line starts it
+    if (gimbalExtra(3).contains(x, y)) {
+        if (tlArmed) tlIndex = (tlIndex + 1) % 4;
+        tlArmed = true;
+        savePrefs();
+        return;
+    }
+    if (tlArmed && GIMBAL_STATUS.contains(x, y)) {
+        tlArmed = false;
+        Moves::playTimelapsePan(cam, TL_MINUTES[tlIndex] * 60000UL, videoWithMove);
+        return;
+    }
+    tlArmed = false;
+    if (gimbalExtra(0).contains(x, y)) cam.gimbalLevel();
+    if (gimbalExtra(1).contains(x, y)) {
+        followSpeed = (followSpeed + 1) % 3;
+        cam.gimbalFollowSpeed(followSpeed);
+        savePrefs();
+    }
+    if (gimbalExtra(2).contains(x, y)) {
+        rampMode = (rampMode + 1) % 3;
+        Moves::setRamp(rampMode);
+        savePrefs();
     }
     // Always sent: the camera may be in another mode than the board last set
     for (int i = 0; i < cam.optionCount(S_GIMBAL_MODE); i++)
